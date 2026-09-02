@@ -148,10 +148,22 @@ def show(name: str, factory: Callable[[], Any], title: str) -> Any:
             window.show()
             window.raise_()
             window.activateWindow()
-            return window
         except RuntimeError:
             # The underlying C++ object is gone; fall through and rebuild.
             _windows.pop(name, None)
+        else:
+            # A window that was opened, closed and opened again is showing
+            # whatever it read the first time. Anything published since, or a
+            # task changed under it, would be invisible.
+            refresh = getattr(window, 'refresh', None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:
+                    logger.exception(
+                        'Refreshing %s failed; showing it as it was.', name
+                    )
+            return window
 
     window = factory()
     window.setWindowTitle(title)

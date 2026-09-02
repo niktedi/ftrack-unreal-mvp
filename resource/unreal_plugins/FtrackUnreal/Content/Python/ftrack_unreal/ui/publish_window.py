@@ -72,6 +72,37 @@ def create(session: Any, context_store: Any) -> Any:
             self._load_ftrack_data()
             self._refresh_enabled()
 
+            # Follow Change Context while the window sits open.
+            if hasattr(context_store, 'subscribe'):
+                context_store.subscribe(self._on_context_changed)
+
+        # -- refreshing -----------------------------------------------------
+
+        def refresh(self) -> None:
+            '''Re-read everything. Called when the window is re-opened.
+
+            Reopening a window that was merely hidden would otherwise show the
+            asset list from the last time it was built -- without the version
+            just published, and against the wrong task if the context moved.
+            '''
+            if self._busy:
+                # A publish is in flight; it refreshes itself when it lands.
+                return
+
+            self._context_label.setText(context_store.label())
+            self._say('')
+            self._load_sequences()
+            self._load_ftrack_data()
+            self._refresh_enabled()
+
+        def _on_context_changed(self, entity) -> None:
+            self.refresh()
+
+        def closeEvent(self, event) -> None:
+            if hasattr(context_store, 'unsubscribe'):
+                context_store.unsubscribe(self._on_context_changed)
+            super().closeEvent(event)
+
         # -- construction ---------------------------------------------------
 
         def _build_ui(self) -> None:
@@ -164,10 +195,17 @@ def create(session: Any, context_store: Any) -> Any:
 
         def _load_sequences(self) -> None:
             '''Read the Asset Registry. Cheap, and must be on the game thread.'''
+            previous = self._source_combo.currentData()
+
             self._sequences = camera_fbx.list_level_sequences()
             self._source_combo.clear()
             for entry in self._sequences:
                 self._source_combo.addItem(entry.label, entry.package_path)
+
+            if previous is not None:
+                restored = self._source_combo.findData(previous)
+                if restored >= 0:
+                    self._source_combo.setCurrentIndex(restored)
 
             if not self._sequences:
                 self._say(
@@ -216,14 +254,19 @@ def create(session: Any, context_store: Any) -> Any:
             self._assets = data['assets']
             self._statuses = data['statuses']
 
+            previous_asset = self._asset_combo.currentData()
+            previous_status = self._status_combo.currentData()
+
             self._asset_combo.clear()
             for asset in self._assets:
                 self._asset_combo.addItem(asset['name'], asset['id'])
+            self._restore(self._asset_combo, previous_asset)
 
             self._status_combo.clear()
             self._status_combo.addItem('(leave default)', None)
             for name in self._statuses:
                 self._status_combo.addItem(name, name)
+            self._restore(self._status_combo, previous_status)
 
             if not self._assets:
                 self._existing_radio.setToolTip(
@@ -234,6 +277,15 @@ def create(session: Any, context_store: Any) -> Any:
 
             self._say('')
             self._refresh_enabled()
+
+        @staticmethod
+        def _restore(combo, value) -> None:
+            '''Reselect *value* in *combo* if it is still there.'''
+            if value is None:
+                return
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
 
         def _on_ftrack_data_failed(self, error: BaseException) -> None:
             self._say(

@@ -44,8 +44,37 @@ class StubContext:
 
     context_id = 'check-task-id'
 
+    def __init__(self):
+        self.text = 'Demo / sh010 / animation'
+        self.listeners = []
+
     def label(self):
-        return 'Demo / sh010 / animation'
+        return self.text
+
+    def subscribe(self, callback):
+        self.listeners.append(callback)
+
+    def unsubscribe(self, callback):
+        if callback in self.listeners:
+            self.listeners.remove(callback)
+
+    def change_to(self, text):
+        '''Pretend the user picked another task.'''
+        self.text = text
+        for callback in list(self.listeners):
+            callback(None)
+
+
+def make_sequence(name):
+    '''Create one throwaway Level Sequence under the probe package.'''
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    sequence = tools.create_asset(
+        name, PROBE_PACKAGE, unreal.LevelSequence, unreal.LevelSequenceFactoryNew()
+    )
+    sequence.set_display_rate(unreal.FrameRate(24, 1))
+    sequence.set_playback_start(0)
+    sequence.set_playback_end(24)
+    return sequence
 
 
 def build():
@@ -98,12 +127,13 @@ def main():
     unreal.log('=' * 70)
 
     camera = None
+    context = StubContext()
     try:
         camera = build()
         qt_app.ensure_app()
         window = qt_app.show(
             'publish',
-            publish_window.make_factory(None, StubContext()),
+            publish_window.make_factory(None, context),
             'ftrack - Publish',
         )
         check('window constructed and shown', window is not None and window.isVisible())
@@ -177,6 +207,87 @@ def main():
         window._set_busy(True)
         check('publishing disables the form', not window._publish_button.isEnabled())
         window._set_busy(False)
+
+        # -- reopening must re-read, not show what it read the first time ---
+
+        window._source_combo.setCurrentIndex(0)
+        chosen = window._source_combo.currentData()
+        make_sequence('Seq_FtrackPublishWindowCheckSecond')
+
+        reopened = qt_app.show(
+            'publish',
+            publish_window.make_factory(None, context),
+            'ftrack - Publish',
+        )
+        check('reopening returns the same window', reopened is window)
+
+        sources = [
+            window._source_combo.itemText(index)
+            for index in range(window._source_combo.count())
+        ]
+        check(
+            'reopening picks up a sequence added since',
+            any('Second' in text for text in sources),
+            sources,
+        )
+        check(
+            'the chosen sequence survives the refresh',
+            window._source_combo.currentData() == chosen,
+            window._source_combo.currentData(),
+        )
+
+        window._on_ftrack_data(
+            {
+                'assets': [
+                    {'id': 'a1', 'name': 'camA'},
+                    {'id': 'a2', 'name': 'camB'},
+                ],
+                'statuses': ['WIP', 'Approved'],
+                'parent_name': 'sh010',
+            }
+        )
+        window._asset_combo.setCurrentIndex(1)
+        window._on_ftrack_data(
+            {
+                'assets': [
+                    {'id': 'a1', 'name': 'camA'},
+                    {'id': 'a2', 'name': 'camB'},
+                    {'id': 'a3', 'name': 'camC'},
+                ],
+                'statuses': ['WIP', 'Approved'],
+                'parent_name': 'sh010',
+            }
+        )
+        check(
+            'the chosen asset survives a reload of the list',
+            window._asset_combo.currentData() == 'a2',
+            window._asset_combo.currentData(),
+        )
+
+        # -- the window follows Change Context ------------------------------
+
+        context.change_to('Demo / sh020 / layout')
+        check(
+            'a context change updates the window',
+            window._context_label.text() == 'Demo / sh020 / layout',
+            window._context_label.text(),
+        )
+
+        window._set_busy(True)
+        context.change_to('Demo / sh030 / anim')
+        check(
+            'a refresh during a publish is ignored',
+            window._context_label.text() == 'Demo / sh020 / layout',
+            window._context_label.text(),
+        )
+        window._set_busy(False)
+
+        window.close()
+        check(
+            'closing unsubscribes from the context store',
+            context.listeners == [],
+            context.listeners,
+        )
     finally:
         clean_up(camera)
 
