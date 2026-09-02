@@ -11,8 +11,9 @@ the editor process.
 Phases 2 to 4 replace it one window at a time.
 
 The widget class is built inside a function so that importing this module does
-not require PySide6. Same reason the studio's ``mroya_asset_watcher`` does it:
-these modules are imported early, and Qt may not be on the path yet.
+not require PySide6. The bootstrap imports it early, before Qt is guaranteed to
+be on the path, and a module that fails at import time would take the whole
+integration down with it.
 '''
 
 from __future__ import annotations

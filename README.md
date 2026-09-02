@@ -238,12 +238,29 @@ modal dialog can also still freeze the editor.
 
 The menu stays native `unreal.ToolMenus` either way.
 
-**Own publisher, not `ftrack_inout`.** `publish/publisher.py` talks to
-`ftrack_api` directly; nothing is imported across the plugin path. Given up by
-this choice, and worth revisiting if Unreal publishes need to match the other
-DCCs exactly: the `latest_published_list` metadata index on the asset,
-auto-timelogs, and the automatic transfer to `s3.studio.storage`. Component names
-and asset types are still kept compatible with that code.
+**No dependency on any other plugin.** `C:\mrpipetrack_plugins` holds a dozen
+sibling plugins, several of them importable and tempting: `ftrack_inout` has a
+publisher core and a browser widget already half-wired for Unreal
+(`dcc="unreal"`, `on_import_to_unreal`, an empty `browser/dcc/ue5` adapter), and
+`dep_common` has a copy of ftrack_api. None of it is used.
+
+Reaching across would tie this plugin's lifetime to theirs — their refactors
+would break Unreal — and it would stop being installable on its own. So
+`publish/publisher.py` talks to `ftrack_api` directly, and everything the
+runtime needs is vendored into `dependencies/`.
+
+The rule is enforced, not just written down: `tests/test_independence.py` parses
+every source file and fails on any import outside the allowlist (standard
+library, our own package, what `requirements.txt` vendors, and what the host
+process provides — `unreal` in the editor, `ftrack_api` / `ftrack_utils` in
+Connect). It also fails if a sibling plugin is so much as named in a comment, or
+if anything but `bootstrap.ensure_dependencies_on_path` writes to `sys.path`.
+
+Consciously given up, and the price of the rule: the studio conventions
+`ftrack_inout` implements — the `latest_published_list` metadata index on the
+asset, auto-timelogs on publish, the automatic transfer to `s3.studio.storage`.
+Component names and asset types are still kept compatible with that code, so
+files published from Unreal read correctly in the other DCCs.
 
 **The launcher passes no `.uproject`.** Unreal opens its Project Browser and the
 integration starts once a project is loaded. Reversible: Connect flattens
