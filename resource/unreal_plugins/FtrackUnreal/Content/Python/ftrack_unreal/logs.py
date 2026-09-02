@@ -47,7 +47,11 @@ class UnrealLogHandler(logging.Handler):
 def configure(level: int = logging.INFO) -> logging.Logger:
     '''Configure and return the ``ftrack.unreal`` logger.
 
-    Safe to call more than once; only the first call installs a handler.
+    Safe to call repeatedly, including across a reload of the integration.
+    Any handler from a previous run is removed first: ``logging`` keeps its
+    loggers in its own registry, so the logger object outlives our modules
+    while the "already configured" flag does not -- leave the old handler in
+    place and every reload adds another copy of every line.
 
     Args:
         level: Threshold for the integration's own records.
@@ -59,8 +63,15 @@ def configure(level: int = logging.INFO) -> logging.Logger:
 
     logger = logging.getLogger(LOGGER_NAME)
 
-    if _configured:
+    if _configured and logger.handlers:
         return logger
+
+    for existing in list(logger.handlers):
+        logger.removeHandler(existing)
+        try:
+            existing.close()
+        except Exception:
+            pass
 
     handler: logging.Handler
     if unreal is not None:

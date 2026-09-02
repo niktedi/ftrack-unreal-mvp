@@ -152,6 +152,18 @@ def build(context_label: str, actions: Dict[str, Callable[[], None]]) -> None:
         actions.get('change_context'),
     )
 
+    # Unreal runs init_unreal.py once per session, so without this a code
+    # change means restarting the editor and reloading the project.
+    menu.add_section('developer', 'Developer')
+    _add_entry(
+        menu,
+        'developer',
+        'ftrack_reload',
+        'Reload integration',
+        'Re-read the ftrack Python modules without restarting Unreal',
+        actions.get('reload'),
+    )
+
     tool_menus.refresh_all_widgets()
     logger.info('Menu built (context: %s)', context_label)
 

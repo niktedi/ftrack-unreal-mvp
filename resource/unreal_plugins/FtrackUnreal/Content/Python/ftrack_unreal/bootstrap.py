@@ -87,12 +87,65 @@ def _open_tool(name: str, label: str, phase: str) -> Callable[[], None]:
 def _build_actions() -> Dict[str, Callable[[], None]]:
     '''Return the menu actions available in this build.
 
-    Every tool currently opens the placeholder window; phases 2 to 4 swap the
+    Tools not built yet open the placeholder; phases 3 and 4 swap those
     factories out one at a time.
     '''
-    return {
+    actions = {
         name: _open_tool(name, label, phase) for name, label, phase in TOOLS
     }
+    actions['reload'] = reload_integration
+    return actions
+
+
+def reload_integration() -> bool:
+    '''Tear the integration down, re-read every module, and start it again.
+
+    Unreal runs ``init_unreal.py`` once per editor session, so without this a
+    code change means restarting the editor -- and with it the project load,
+    which is the expensive part. This drops every ``ftrack_unreal`` module from
+    ``sys.modules`` so the next import reads from disk.
+
+    The function object running this is owned by the module being dropped; that
+    is safe, because the call stack keeps it alive until it returns.
+
+    Returns:
+        Whether the integration came back up.
+    '''
+    from . import unreal_env
+
+    logger.info('Reloading the ftrack integration...')
+
+    try:
+        shutdown()
+    except Exception:
+        logger.exception('Shutdown failed; reloading anyway.')
+
+    package = __name__.split('.')[0]
+    for name in [
+        name
+        for name in list(sys.modules)
+        if name == package or name.startswith(package + '.')
+    ]:
+        del sys.modules[name]
+
+    try:
+        # Re-imported by name: the module objects above are gone, so this
+        # reads the current files from disk.
+        module = __import__(package + '.bootstrap', fromlist=['bootstrap'])
+        started = module.bootstrap()
+    except Exception as error:
+        logger.exception('Reload failed.')
+        unreal_env.show_message(
+            'ftrack',
+            'Reloading the integration failed: {0}\nRestart Unreal to '
+            'recover.'.format(error),
+            is_error=True,
+        )
+        return False
+
+    if started:
+        logger.info('Reload complete.')
+    return started
 
 
 def bootstrap(level: int = logging.INFO) -> bool:
