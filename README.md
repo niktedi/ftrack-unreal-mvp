@@ -259,11 +259,17 @@ Consequences, and they are mild:
   `ui_bridge` must be imported eagerly from `bootstrap.bootstrap()`, never lazily
   on first menu click.
 
-**Still open — the manual half.** Build `EUW_Spike`, wire the Python nodes,
-**save**, restart the editor, reopen. That is what proves the editor will
-serialise such a Blueprint at all, and that a `TreeView` will drive a
-Python-defined item type. Run `py "…/scripts/spike_umg_bridge.py"` in the editor;
-the script prints the steps.
+**Still open — the manual half.** Two throwaway assets, built by hand:
+`WBP_SpikeRow` (a User Widget implementing `UserObjectListEntry`, which draws one
+row) and `EUW_Spike` (an Editor Utility Widget holding the `TreeView`). Wire them
+to the Python nodes, **save**, restart the editor, reopen. That is what proves
+the editor will serialise such a Blueprint at all, and that a `TreeView` will
+drive a Python-defined item type — neither is answerable from Python. Run
+`py "…/scripts/spike_umg_bridge.py"` in the editor; it prints the full steps.
+
+A later rewrite of `spike_umg_bridge.py` — classes reordered, functions replaced
+— left the class path at `_0xFFE4DAAF`, which re-confirms the table above from a
+real edit rather than a synthetic one.
 
 ---
 

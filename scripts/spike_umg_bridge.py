@@ -35,36 +35,9 @@ def check(name, ok, detail=''):
 
 
 # ---------------------------------------------------------------------------
-# 1. A Python uclass exposing static functions to Blueprint.
-# ---------------------------------------------------------------------------
-
-@unreal.uclass()
-class FtrackSpikeLibrary(unreal.BlueprintFunctionLibrary):
-    '''Stand-in for the real data provider the UMG widgets will call.'''
-
-    @unreal.ufunction(
-        static=True,
-        ret=unreal.Array(str),
-        params=[str],
-        meta=dict(Category='ftrack|Spike'),
-    )
-    def get_children(entity_id):
-        '''Return fake child labels for *entity_id*.'''
-        return ['{0}/child_{1}'.format(entity_id, index) for index in range(3)]
-
-    @unreal.ufunction(
-        static=True,
-        ret=str,
-        params=[str],
-        meta=dict(Category='ftrack|Spike'),
-    )
-    def get_label(entity_id):
-        '''Return a display label for *entity_id*.'''
-        return 'label of {0}'.format(entity_id)
-
-
-# ---------------------------------------------------------------------------
-# 2. A Python uclass usable as a TreeView item.
+# 1. A Python uclass usable as a TreeView item.
+#
+# Defined before the library, because the library's signatures refer to it.
 # ---------------------------------------------------------------------------
 
 @unreal.uclass()
@@ -92,32 +65,122 @@ def make_item(entity_type, entity_id, label):
     return item
 
 
+# ---------------------------------------------------------------------------
+# 2. A Python uclass exposing static functions to Blueprint.
+#
+# A UMG TreeView is driven by *objects*, not strings: Set List Items takes an
+# array of Objects, On Get Item Children hands you one item and an out array to
+# fill, and the row widget receives the item through On List Item Object Set.
+# So the three functions below are shaped the way the real ui_bridge will be.
+# ---------------------------------------------------------------------------
+
+@unreal.uclass()
+class FtrackSpikeLibrary(unreal.BlueprintFunctionLibrary):
+    '''Stand-in for the real data provider the UMG widgets will call.'''
+
+    @unreal.ufunction(
+        static=True,
+        ret=unreal.Array(FtrackSpikeTreeItem),
+        meta=dict(Category='ftrack|Spike'),
+    )
+    def get_root_items():
+        '''Return the top level of the fake tree.'''
+        return [
+            make_item('Asset', 'asset-{0}'.format(index), 'asset_{0}'.format(index))
+            for index in range(3)
+        ]
+
+    @unreal.ufunction(
+        static=True,
+        ret=unreal.Array(FtrackSpikeTreeItem),
+        params=[FtrackSpikeTreeItem],
+        meta=dict(Category='ftrack|Spike'),
+    )
+    def get_item_children(item):
+        '''Return the children of *item*, lazily, like the real model will.
+
+        Assets get versions; versions are leaves.
+        '''
+        if item is None:
+            return []
+        if item.get_editor_property('entity_type') != 'Asset':
+            return []
+
+        entity_id = item.get_editor_property('entity_id')
+        item.set_editor_property('children_loaded', True)
+        return [
+            make_item(
+                'AssetVersion',
+                '{0}-v{1:03d}'.format(entity_id, version),
+                'v{0:03d}'.format(version),
+            )
+            for version in range(1, 4)
+        ]
+
+    @unreal.ufunction(
+        static=True,
+        ret=str,
+        params=[FtrackSpikeTreeItem],
+        meta=dict(Category='ftrack|Spike'),
+    )
+    def get_item_label(item):
+        '''Return the text a row widget should display for *item*.'''
+        if item is None:
+            return '<none>'
+        return '{0}  [{1}]'.format(
+            item.get_editor_property('label'),
+            item.get_editor_property('entity_type'),
+        )
+
+
 MANUAL_STEPS = '''
-Manual half of the spike -- this is what actually decides the architecture:
+Manual half of the spike. Everything below must be done while this script has
+been run in the current editor session -- the Python classes only exist after
+that, and the Blueprint palette will not show their nodes otherwise.
 
- 1. Content Browser -> right click -> Editor Utilities -> Editor Utility Widget.
+Two assets are needed. A UMG TreeView cannot draw a row by itself: it needs a
+separate "entry widget" that implements the UserObjectListEntry interface and
+receives one item object per row.
+
+A. The row widget
+ 1. Content Browser -> right click -> User Interface -> Widget Blueprint ->
+    User Widget. Name it WBP_SpikeRow.
+ 2. On its canvas drop a Text Block. Rename it TxtLabel and tick Is Variable.
+ 3. Class Settings -> Interfaces -> Add -> UserObjectListEntry.
+ 4. In the graph, right click -> Event On List Item Object Set. From its
+    ListItemObject pin: Cast To FtrackSpikeTreeItem -> Get Item Label
+    (Category: ftrack|Spike) -> TxtLabel SetText.
+    (Get Item Label is the node this script defines; it takes the item object.)
+ 5. Compile, save.
+
+B. The tool window
+ 6. Content Browser -> right click -> Editor Utilities -> Editor Utility Widget.
     Name it EUW_Spike.
- 2. Drop a TreeView and a Button on the canvas.
- 3. In the graph, place these nodes (they come from the Python uclass above,
-    so they only exist while this script has been run):
-       - Get Children  (Category: ftrack|Spike)
-       - Get Label     (Category: ftrack|Spike)
-    Wire Get Label into a Print String on the button click.
- 4. Set the TreeView's Entry Widget Class and bind On Get Item Children.
- 5. SAVE the asset.  <-- the risky step
- 6. RESTART the editor, then reopen EUW_Spike.
+ 7. Drop a TreeView and a Button on the canvas. Select the TreeView and set
+    Entry Widget Class = WBP_SpikeRow.
+ 8. In the graph: Event Pre Construct (or Event Construct) ->
+    Get Root Items -> TreeView Set List Items.
+ 9. Select the TreeView, and in Details -> Events add On Get Item Children.
+    In that event: cast the Item pin to FtrackSpikeTreeItem ->
+    Get Item Children -> assign the result to the Children out pin.
+10. On the button's OnClicked: Get Item Label of any item -> Print String.
+11. SAVE both assets.  <-- the step that can fail
+12. Run the widget: right click EUW_Spike -> Run Editor Utility Widget.
+    Three assets should appear, each expanding to v001..v003 only when clicked.
+13. RESTART the editor, then reopen EUW_Spike (run this script first if you
+    want the nodes live again).
 
-Pass:  the asset opens, the Python nodes are intact (not red "missing
-       function" stubs), and clicking the button still prints.
-Fail:  the editor crashes on save, the nodes come back red, or the asset
+Pass:  both assets open, the Python nodes are intact (not red "missing
+       function" stubs), the tree still populates and expands.
+Fail:  the editor crashes on save, the nodes come back red, or an asset
        refuses to load.
 
 Worth a second pass once it works: add a uproperty to FtrackSpikeTreeItem above,
 restart, reopen. Check 4 predicts the Blueprint still resolves -- the class path
-does not move when the class changes, only when this file does. Confirm it, then
-the "never rename or move the module" rule in D9 is the only thing to remember.
+does not move when the class changes, only when this file does. Confirm it, and
+then "never rename or move the module" is the only rule to remember.
 
-On failure, fall back to the thin C++ module described in the plan:
+On failure, fall back to the thin C++ module described in the README:
 UFtrackTreeItem : UObject with UPROPERTYs, and UFtrackBridge :
 UBlueprintFunctionLibrary forwarding into Python via
 IPythonScriptPlugin::Get()->ExecPythonCommandEx. The Widget Blueprints then
@@ -131,16 +194,38 @@ def main():
     unreal.log('=' * 70)
 
     # 1. Static ufunctions callable from Python (and, once this has run, from
-    #    the Blueprint palette).
+    #    the Blueprint palette). These are the exact three nodes the manual half
+    #    wires up, including the object-typed ones a TreeView needs.
     try:
-        children = FtrackSpikeLibrary.get_children('root')
+        roots = FtrackSpikeLibrary.get_root_items()
         check(
-            'BlueprintFunctionLibrary static ufunction',
-            list(children) == ['root/child_0', 'root/child_1', 'root/child_2'],
-            'returned {0}'.format(list(children)),
+            'ufunction returning an array of Python uclass objects',
+            len(roots) == 3,
+            '{0} root items'.format(len(roots)),
+        )
+
+        children = FtrackSpikeLibrary.get_item_children(roots[0])
+        leaves = FtrackSpikeLibrary.get_item_children(children[0])
+        check(
+            'ufunction taking a Python uclass object (lazy children)',
+            len(children) == 3 and len(leaves) == 0,
+            '{0} versions under the asset, {1} under a version'.format(
+                len(children), len(leaves)
+            ),
+        )
+        check(
+            'children_loaded flipped on the item that was expanded',
+            roots[0].get_editor_property('children_loaded') is True,
+        )
+
+        label = FtrackSpikeLibrary.get_item_label(children[0])
+        check(
+            'ufunction returning a display label',
+            label == 'v001  [AssetVersion]',
+            repr(label),
         )
     except Exception as error:
-        check('BlueprintFunctionLibrary static ufunction', False, str(error))
+        check('object-typed ufunctions', False, str(error))
 
     # 2. uproperties on a Python-defined unreal.Object.
     try:
