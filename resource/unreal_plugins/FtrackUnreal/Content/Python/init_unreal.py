@@ -13,7 +13,7 @@ stop the editor from starting.
 
 import traceback
 
-import unreal
+import unreal  # pyright: ignore[reportMissingImports]
 
 
 def _main() -> None:

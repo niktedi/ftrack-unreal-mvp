@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List, Optional
 
-import unreal
+import unreal  # pyright: ignore[reportMissingImports]
 
 from .logs import get_logger
 

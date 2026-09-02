@@ -9,7 +9,7 @@ Targets ftrack Connect 24.11.0 and Unreal Engine 5.5 / 5.7 (Python 3.11.8).
 
 | Phase | | |
 |---|---|---|
-| 0 | Spike: UMG ↔ Python bridge | scripts ready, **not run** |
+| 0 | Spike: UMG ↔ Python bridge | automated half **passed**, manual half pending |
 | 1 | Launch from Connect + menu | done |
 | 2 | Publish — camera → FBX | not started |
 | 3 | Asset Manager | not started |
@@ -28,13 +28,12 @@ build the vendored dependencies and restart Connect:
 python scripts/build_dependencies.py --clean
 ```
 
+`dependencies/` is not in git, so this step is required after a fresh clone.
 Unreal's own interpreter is used for the install, so anything with a compiled
 extension is built for the right Python. Restart ftrack Connect afterwards; it
 only scans for plugins at start-up.
 
-Nothing has to be copied into an Unreal project. The plugin is staged through
-`UE_ADDITIONAL_PLUGIN_PATHS` and enables itself in whichever project is opened —
-see [docs/DECISIONS.md](docs/DECISIONS.md) D3.
+Nothing has to be copied into an Unreal project — see *How it works* below.
 
 ## Use
 
@@ -49,14 +48,224 @@ see [docs/DECISIONS.md](docs/DECISIONS.md) D3.
 ```
 hook/                Connect side: discover + launch subscribers
 launch/              launch_config yaml (where UnrealEditor.exe is found)
-dependencies/        vendored ftrack_api and its closure, pure Python
+dependencies/        vendored ftrack_api and its closure (built, not in git)
 resource/
   unreal_plugins/    <- UE_ADDITIONAL_PLUGIN_PATHS points here
     FtrackUnreal/    the Unreal plugin: .uplugin, Content/UI, Content/Python
 scripts/             build_dependencies.py, spike_umg_bridge.py
 tests/               pure-layer tests, no Unreal required
-docs/                DECISIONS.md, ARCHITECTURE.md
 ```
+
+---
+
+## How it works
+
+### Two processes, four environment variables
+
+```
+ftrack Connect (Python 3.11, its own ftrack_api 2.5.4)
+│
+│  hook/discover_ftrack_unreal.py
+│    subscribes: ftrack.connect.application.discover / .launch
+│                data.application.identifier=unreal*
+│  launch/unreal-launch.yaml
+│    finds C:\Program Files\Epic Games\UE_*\Engine\Binaries\Win64\UnrealEditor.exe
+│
+└──> subprocess.Popen(["UnrealEditor.exe"], env=...)
+     │
+     │   UE_PYTHONPATH              <plugin>/dependencies
+     │   UE_ADDITIONAL_PLUGIN_PATHS <plugin>/resource/unreal_plugins
+     │   FTRACK_UNREAL_PLUGIN_ROOT  <plugin>
+     │   FTRACK_CONTEXTID           the task selected in Connect
+     │   FTRACK_SERVER / _API_USER / _API_KEY   (inherited from Connect)
+     v
+Unreal Editor (embedded Python 3.11.8, isolated interpreter)
+     │
+     ├─ PluginManager finds FtrackUnreal.uplugin under UE_ADDITIONAL_PLUGIN_PATHS
+     │    EnabledByDefault: true  ->  enabled without touching the project
+     │    Plugins: [...]          ->  force-enables PythonScriptPlugin
+     │
+     ├─ PythonScriptPlugin puts <FtrackUnreal>/Content/Python on sys.path
+     │    and runs init_unreal.py from every sys.path entry
+     │
+     └─ init_unreal.py -> ftrack_unreal.bootstrap.bootstrap()
+            session -> context -> menu
+```
+
+### The layering rule
+
+The one structural rule in the codebase: **the data layer never imports
+`unreal`.** It is what makes the interesting logic testable with no editor and
+no engine install.
+
+| Pure — `import unreal` is a bug | Adapters — allowed to touch the editor |
+|---|---|
+| `session.py` | `unreal_env.py` |
+| `context.py` | `menu.py` |
+| `publish/publisher.py` | `ui_bridge.py` |
+| `asset_manager/tree_model.py` | `publish/camera_fbx.py`, `publish/thumbnail.py` |
+| | `asset_manager/details.py` |
+
+`logs.py` sits on the boundary: it imports `unreal` inside a `try`, so the same
+module gives Output Log severity routing inside the editor and a plain stream
+handler under the tests.
+
+`unreal_env.py` is the seam. Anything the pure layer needs from the editor — the
+project's `Saved` directory, the engine version, a message box — is a function
+there, passed in by the caller. `ContextStore`, for instance, takes a
+`config_path` rather than asking Unreal where the project is.
+
+### Session and context
+
+One session per editor process, created lazily, event hub left disconnected —
+nothing publishes or subscribes to server events, and an extra background thread
+inside the editor only creates ways to touch the API off the main thread.
+
+Context resolution order at start-up:
+
+1. `FTRACK_CONTEXTID` — set by the hook, authoritative for this launch.
+2. `<Project>/Saved/Config/ftrack.ini` — what a previous *Change Context* wrote,
+   so a plain editor restart does not lose the task.
+
+`ContextStore.set_context` also writes `os.environ['FTRACK_CONTEXTID']`, so
+anything spawned from the editor inherits the same context. Listeners registered
+through `subscribe()` are how the menu label and (from phase 4) the open windows
+follow a context change; a listener that raises is logged and skipped rather than
+being allowed to abort the change.
+
+### Threading and errors
+
+ftrack queries and thumbnail downloads must not block the editor for more than
+~200 ms. From phase 3 onwards: run the network call on a worker thread, then
+apply the result on the game thread via
+`unreal.register_slate_post_tick_callback`. Nothing may touch a `unreal.*` object
+from the worker.
+
+ftrack failures the user can act on — no credentials, no permission, no location
+— surface through `unreal_env.show_message` as one sentence; tracebacks go to the
+log. `session.FtrackSessionError` exists to carry messages written for a dialog.
+
+---
+
+## Decisions
+
+Verified on 2026-09-02, not assumed: Connect **24.11.0**
+(`C:\mrpipe\ftrack\_internal\ftrack_connect\__version__.py`), plugin path
+`C:\mrpipe\ftrack_plugins` (`C:\mrpipe\config\mroya.yaml`), Unreal **5.5.4** and
+**5.7.4**, Python **3.11.8** in both. The
+`HKLM\SOFTWARE\EpicGames\Unreal Engine` registry key also lists 5.4, but that
+directory no longer exists — one reason discovery stays on Connect's filesystem
+walk rather than the registry.
+
+**Connect 3 launch config, hand-rolled integration.** `launch/*.yaml` plus a
+classic `hook/*.py` with `register(session)`. No `ftrack_framework_core`, no
+`extensions/` tool-configs. This is the shape `mroya-nuke` already uses here, and
+nothing in-house uses framework v2 — which would also force the UI through
+`ftrack_framework_qt`, the opposite of the native-UMG decision.
+
+**The repository is the Connect plugin.** `hook/`, `launch/`, `dependencies/`,
+`resource/` at the root rather than under `connect-plugin/`, because the checkout
+sits directly on `FTRACK_CONNECT_PLUGIN_PATH`. Connect finds a plugin by looking
+for `hook/*.py` in each immediate subdirectory
+(`ftrack_connect/utils/plugin.py:161`). The folder name carries the version;
+`ftrack-unreal-mvp` has none, so Connect loads it as `0.0.0` with a deprecation
+warning — the same state `mroya-nuke` and `ftrack-connect-browser-widget` are in.
+Renaming to `ftrack-unreal-mvp-0.1.0` would silence it.
+
+**No copying the plugin into each project.** `UE_ADDITIONAL_PLUGIN_PATHS`
+(`PluginManager.cpp:83`, `WITH_EDITOR` only, `;`-separated on Windows) exists for
+exactly this, per the engine's own comment: *"to support traditional DCC film
+pipelines where plugins can be staged depending on the context."* A plugin found
+that way is `EPluginType::External`, whose `GetLoadedFrom()` returns `Project`
+(`PluginManager.cpp:428-437`), so `"EnabledByDefault": true` is enough to enable
+it (`FPlugin::IsEnabledByDefault`, line 412). Then, from
+`PythonScriptPlugin.cpp`: `:1041-1048` every mounted content root contributes its
+`Content/Python` to `sys.path`; `:1056-1060` `UE_PYTHONPATH` is appended;
+`:1404-1420` `init_unreal.py` runs from *every* `sys.path` entry. Plain
+`PYTHONPATH` is not usable — `:966` sets `Py_IgnoreEnvironmentFlag` when the
+interpreter runs isolated, which is the default.
+
+**Native UMG, not PySide.** Decided against the studio's established pattern
+(external PySide6 process + TCP JSON-RPC, as in `mroya-nuke` and
+`ftrack_framework_blender`) and against running PySide6 inside the editor. Cost
+accepted: `.uasset` files are binary in git. Fallback if phase 0's manual half
+fails: a thin C++ module providing `UFtrackTreeItem : UObject` and
+`UFtrackBridge : UBlueprintFunctionLibrary` forwarding into Python via
+`IPythonScriptPlugin::Get()->ExecPythonCommandEx`, so the Blueprints reference
+C++ classes and the Python data layer is untouched — at the cost of a build per
+engine version.
+
+**Own publisher, not `ftrack_inout`.** `publish/publisher.py` talks to
+`ftrack_api` directly; nothing is imported across the plugin path. Given up by
+this choice, and worth revisiting if Unreal publishes need to match the other
+DCCs exactly: the `latest_published_list` metadata index on the asset,
+auto-timelogs, and the automatic transfer to `s3.studio.storage`. Component names
+and asset types are still kept compatible with that code.
+
+**The launcher passes no `.uproject`.** Unreal opens its Project Browser and the
+integration starts once a project is loaded. Reversible: Connect flattens
+`launch_data['integration']['launch_arguments']` into the command line
+(`application_launcher/__init__.py:587-601`).
+
+**Dependencies pinned by hand, installed with `--no-deps`.**
+`ftrack-python-api` 3.1.0 declares `sphinx-notfound-page` as a runtime
+requirement. Nothing under `ftrack_api/` imports it (verified by grep), but pip
+resolves it into the whole of Sphinx: **66 MB** versus **4.3 MB** without. The
+resulting package list matches the studio's `dep_common` bundle (minus `future`,
+which 3.1.0 no longer needs). The install runs under *Unreal's own* interpreter so
+any wheel with a compiled extension is built for cp311 — `charset_normalizer`
+ships one.
+
+**Menu callbacks are looked up by entry name.** `FtrackMenuEntry.execute`
+resolves its callback from a module-level dict keyed by `self.data.name` rather
+than reading an attribute off the Python instance, and the entry objects are
+retained in `menu._entries`. Both guard the same failure: objects handed to
+`ToolMenus` are owned by the engine, and anything depending on Python-side
+instance state surviving the round trip is a menu item that silently stops
+working.
+
+### Phase 0 result (automated half)
+
+`scripts/spike_umg_bridge.py` on UE 5.5. All four checks pass: static
+`ufunction`s on a Python `BlueprintFunctionLibrary` are callable, `uproperty`
+round-trips on an `unreal.Object` subclass, retained items survive
+`collect_garbage()` (51 of 51).
+
+The interesting result is check 4. Python `uclass`es register under a hashed
+name — `/Engine/PythonTypes.FtrackSpikeTreeItem_0xFFE4DAAF` — and that path is
+what a Widget Blueprint serialises. Measured by running variants headless:
+
+| file | contents | class path |
+|---|---|---|
+| `hash_fixed.py` | 2 uproperties | `FtrackHashItem_0x100D696C` |
+| `hash_fixed.py` | 2 uproperties, rerun | `FtrackHashItem_0x100D696C` |
+| `hash_fixed.py` | **3 uproperties** | `FtrackHashItem_0x100D696C` |
+| `hash_fixed.py` | back to 2 | `FtrackHashItem_0x100D696C` |
+| `hash_variant.py` | same classes | `..._0x8FB6AA16` |
+| `spike_umg_bridge.py` | same classes | `..._0xFFE4DAAF` |
+
+So the hash comes from the **path of the defining module**, not from the class,
+its members, or `__name__` — all three scripts ran as `__main__` and still got
+different hashes. Every class in one module shares that module's hash.
+
+Consequences, and they are mild:
+
+- A Blueprint's reference survives editor restarts *and* edits to the class it
+  points at. This was the main risk behind the native-UMG decision.
+- **Never rename or move a `.py` file that defines a `uclass` a Blueprint
+  references.** This pins `ftrack_unreal/ui_bridge.py`: its path becomes part of
+  the plugin's contract, not an implementation detail.
+- The classes must exist before a Blueprint referencing them loads, so
+  `ui_bridge` must be imported eagerly from `bootstrap.bootstrap()`, never lazily
+  on first menu click.
+
+**Still open — the manual half.** Build `EUW_Spike`, wire the Python nodes,
+**save**, restart the editor, reopen. That is what proves the editor will
+serialise such a Blueprint at all, and that a `TreeView` will drive a
+Python-defined item type. Run `py "…/scripts/spike_umg_bridge.py"` in the editor;
+the script prints the steps.
+
+---
 
 ## Tests
 
@@ -79,16 +288,9 @@ match this machine's install location.
 
 **Launcher appears but nothing happens in Unreal.** Check the editor's Output
 Log. If there is no `ftrack:` line at all, the plugin was not enabled — verify
-`UE_ADDITIONAL_PLUGIN_PATHS` reached the process, and that
-Edit → Plugins shows **ftrack** enabled.
+`UE_ADDITIONAL_PLUGIN_PATHS` reached the process, and that Edit → Plugins shows
+**ftrack** enabled.
 
 **`ftrack credentials are missing from the environment`.** Unreal was started
 outside Connect. Credentials are inherited from the Connect process; there is no
 separate login.
-
-## Documentation
-
-- [docs/DECISIONS.md](docs/DECISIONS.md) — what was decided, what against, and
-  the engine/Connect source that backs it.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — process diagram, the layering
-  rule, module map.

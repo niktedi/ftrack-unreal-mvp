@@ -16,7 +16,7 @@ import logging
 from . import LOGGER_NAME
 
 try:  # pragma: no cover - only importable inside the editor
-    import unreal
+    import unreal  # pyright: ignore[reportMissingImports]
 except ImportError:
     unreal = None
 

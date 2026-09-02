@@ -7,18 +7,21 @@ Run inside the Unreal Editor, from the Output Log's Python console::
 
     py "C:/mrpipe/ftrack_plugins/ftrack-unreal-mvp/scripts/spike_umg_bridge.py"
 
-The automated part below answers what can be answered from Python alone. The
-part that actually decides the architecture is manual and is described in
-MANUAL_STEPS -- a Widget Blueprint that references a Python-defined uclass is
-the known failure mode (it can fail to resolve, or take the editor down, after
-a save/restart cycle), and only a real save + restart proves it either way.
+The automated part below answers what can be answered from Python alone, and
+check 4 in particular settles most of the risk: the class path a Blueprint
+serialises turns out to be stable across restarts and across edits to the class
+(see the comment there, and docs/DECISIONS.md D9).
+
+What is left to the manual half in MANUAL_STEPS is whether the editor is happy
+to *save* such a Blueprint at all, and whether a TreeView will drive a
+Python-defined item type. Only a real save + restart proves those.
 
 Record the outcome in docs/DECISIONS.md before starting phase 2.
 '''
 
 from __future__ import annotations
 
-import unreal
+import unreal  # pyright: ignore[reportMissingImports]
 
 RESULTS = []
 
@@ -109,6 +112,11 @@ Pass:  the asset opens, the Python nodes are intact (not red "missing
 Fail:  the editor crashes on save, the nodes come back red, or the asset
        refuses to load.
 
+Worth a second pass once it works: add a uproperty to FtrackSpikeTreeItem above,
+restart, reopen. Check 4 predicts the Blueprint still resolves -- the class path
+does not move when the class changes, only when this file does. Confirm it, then
+the "never rename or move the module" rule in D9 is the only thing to remember.
+
 On failure, fall back to the thin C++ module described in the plan:
 UFtrackTreeItem : UObject with UPROPERTYs, and UFtrackBridge :
 UBlueprintFunctionLibrary forwarding into Python via
@@ -169,17 +177,41 @@ def main():
     except Exception as error:
         check('items survive collect_garbage() while referenced', False, str(error))
 
-    # 4. Is the class actually registered with the reflection system, i.e. will
-    #    it show up in the Blueprint palette at all?
-    try:
-        found = unreal.load_class(None, '/Script/PythonGeneratedClass') is not None
-        check(
-            'PythonGeneratedClass reflection available',
-            True,
-            'load_class returned {0}'.format(found),
-        )
-    except Exception as error:
-        check('PythonGeneratedClass reflection available', False, str(error))
+    # 4. Where do the Python classes live in the reflection system?
+    #
+    #    This is the check that predicts the manual result. A Widget Blueprint
+    #    serialises the *path* of every class it references, and Python uclasses
+    #    land in /Engine/PythonTypes under a name with a hash suffix:
+    #
+    #        /Engine/PythonTypes.FtrackSpikeTreeItem_0xFFE4DAAF
+    #
+    #    Measured on UE 5.5 by running variants of this file headless: the hash
+    #    is derived from the *path of the defining module*, not from the class
+    #    or its contents. Same file, different class members -> same hash.
+    #    Same classes, different file -> different hash. All classes defined in
+    #    one module share one hash.
+    #
+    #    So the reference a Blueprint stores survives editor restarts and code
+    #    edits, and breaks only if the .py file that defines the class is
+    #    renamed or moved. See docs/DECISIONS.md D9.
+    for name, cls in (
+        ('library', FtrackSpikeLibrary),
+        ('tree item', FtrackSpikeTreeItem),
+    ):
+        try:
+            path = cls.static_class().get_path_name()
+            reloaded = unreal.load_class(None, path)
+            check(
+                'Python {0} class resolvable by path'.format(name),
+                reloaded is not None,
+                path,
+            )
+        except Exception as error:
+            check(
+                'Python {0} class resolvable by path'.format(name),
+                False,
+                str(error),
+            )
 
     unreal.log('-' * 70)
     failed = [name for name, ok, _ in RESULTS if not ok]

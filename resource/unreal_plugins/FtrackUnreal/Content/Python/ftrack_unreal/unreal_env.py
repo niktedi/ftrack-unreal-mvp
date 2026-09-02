@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-import unreal
+import unreal  # pyright: ignore[reportMissingImports]
 
 from .logs import get_logger
 
