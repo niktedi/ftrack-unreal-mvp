@@ -43,16 +43,22 @@ class FakeQuery:
 
 
 class FakeSession:
-    '''Records queries and replays canned results.
+    '''Records queries and ``get`` calls, and replays canned results.
 
-    Results are matched by substring so a test can key on the distinctive part
-    of a query without pinning the whole projection.
+    Query results are matched by substring so a test can key on the
+    distinctive part of a query without pinning the whole projection.
     '''
 
-    def __init__(self, api_user='test.user', results=None):
+    def __init__(self, api_user='test.user', results=None, entities=None):
         self.api_user = api_user
+        self.server_url = 'https://example.ftrackapp.com'
         self.queries = []
+        self.gets = []
         self._results = dict(results or {})
+        self._entities = dict(entities or {})
+        #: Set to an exception instance to make `get` raise, the way a
+        #: ServerError does when a context has gone away.
+        self.get_error = None
 
     def query(self, expression):
         self.queries.append(expression)
@@ -60,3 +66,9 @@ class FakeSession:
             if fragment in expression:
                 return FakeQuery(results)
         return FakeQuery([])
+
+    def get(self, entity_type, entity_id):
+        self.gets.append((entity_type, entity_id))
+        if self.get_error is not None:
+            raise self.get_error
+        return self._entities.get(entity_id)

@@ -118,7 +118,17 @@ def bootstrap(level: int = logging.INFO) -> bool:
         )
 
     _context_store = ContextStore(_session, unreal_env.get_config_path())
-    _context_store.resolve()
+
+    # A context that will not resolve -- deleted task, no permission, a stale
+    # id in ftrack.ini -- must not cost the user the whole integration. The
+    # menu still gets built so Change Context is reachable.
+    try:
+        _context_store.resolve()
+    except Exception:
+        logger.exception(
+            'Could not resolve the current context; continuing without one.'
+        )
+
     logger.info(
         'connected as %s, context %s',
         _session.api_user,

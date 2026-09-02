@@ -28,12 +28,6 @@ logger = get_logger(__name__)
 CONFIG_SECTION = 'ftrack'
 CONFIG_KEY = 'context_id'
 
-#: Projection used everywhere a context entity is fetched.
-CONTEXT_PROJECTION = (
-    'select id, name, link, project.id, project.name, project.full_name, '
-    'parent.id, parent.name from Context where id is "{0}"'
-)
-
 
 class ContextStore:
     '''Holds the current task and notifies listeners when it changes.'''
@@ -67,6 +61,32 @@ class ContextStore:
 
         return self.set_context(context_id, persist=False)
 
+    def _fetch(self, context_id: str) -> Optional[Any]:
+        '''Fetch the context entity for *context_id*, or ``None``.
+
+        Deliberately ``session.get`` rather than a query with an explicit
+        projection. ``Context`` is an abstract schema -- ``Project`` is itself a
+        Context, so there is no ``project`` attribute on the base, and
+        projecting one is a server-side ParseError. ``get`` returns the concrete
+        entity (Task, Shot, ...) and fills attributes in on access; for a single
+        entity that costs one extra round trip at most.
+        '''
+        try:
+            entity = self._session.get('Context', context_id)
+        except Exception as error:
+            logger.error(
+                'Could not read context %s from ftrack: %s', context_id, error
+            )
+            return None
+
+        if entity is None:
+            logger.error(
+                'Context %s does not exist or is not visible to %s.',
+                context_id,
+                self._session.api_user,
+            )
+        return entity
+
     # -- accessors ----------------------------------------------------------
 
     @property
@@ -90,15 +110,8 @@ class ContextStore:
             The resolved entity, or ``None`` when the id could not be fetched.
         '''
         if isinstance(context, str):
-            entity = self._session.query(
-                CONTEXT_PROJECTION.format(context)
-            ).first()
+            entity = self._fetch(context)
             if entity is None:
-                logger.error(
-                    'Context %s does not exist or is not visible to %s.',
-                    context,
-                    self._session.api_user,
-                )
                 return None
         else:
             entity = context
@@ -118,15 +131,24 @@ class ContextStore:
         return entity
 
     def label(self) -> str:
-        '''Return ``Project / Shot / Task`` for the current context.'''
+        '''Return ``Project / Shot / Task`` for the current context.
+
+        ``link`` is the breadcrumb ftrack computes for every context and is the
+        only way to get the project name from here -- see :meth:`_fetch` for why
+        it cannot simply be projected.
+        '''
         if self._entity is None:
             return 'no context'
 
-        link = self._entity.get('link') or []
-        if link:
-            return ' / '.join(item['name'] for item in link)
-
-        return self._entity['name']
+        # Both reads can hit the server: attributes are lazily populated.
+        try:
+            link = self._entity['link'] or []
+            if link:
+                return ' / '.join(item['name'] for item in link)
+            return self._entity['name']
+        except Exception as error:
+            logger.warning('Could not build the context label: %s', error)
+            return self._context_id or 'unknown context'
 
     # -- listeners ----------------------------------------------------------
 

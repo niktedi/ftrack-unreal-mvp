@@ -47,7 +47,7 @@ class ContextEnvironment:
 class TestContextStore(unittest.TestCase):
     def setUp(self):
         self.task = make_task()
-        self.session = FakeSession(results={'from Context': [self.task]})
+        self.session = FakeSession(entities={'task-1': self.task})
         self._env = ContextEnvironment().__enter__()
         self.addCleanup(self._env.__exit__)
 
@@ -67,7 +67,7 @@ class TestContextStore(unittest.TestCase):
         store.set_context(self.task)  # persists task-1
 
         other = make_task('task-2', 'lighting')
-        session = FakeSession(results={'from Context': [other]})
+        session = FakeSession(entities={'task-2': other})
         os.environ['FTRACK_CONTEXTID'] = 'task-2'
 
         resolved = ContextStore(session, self.config_path).resolve()
@@ -85,7 +85,7 @@ class TestContextStore(unittest.TestCase):
         self.assertIsNone(store.context_id)
 
     def test_unknown_context_id_is_reported_not_raised(self):
-        session = FakeSession(results={})  # query returns nothing
+        session = FakeSession()  # knows no entities
         store = ContextStore(session, config_path=None)
         self.assertIsNone(store.set_context('does-not-exist'))
 
@@ -151,6 +151,68 @@ class TestContextStore(unittest.TestCase):
 
         self.assertEqual(store.context_id, 'task-1')
         self.assertEqual(len(seen), 1)
+
+
+class TestContextIsFetchedNotProjected(unittest.TestCase):
+    '''Regression guard for a real failure against a live ftrack server.
+
+    The store used to fetch the context with an explicit projection::
+
+        select id, name, link, project.id, project.name, ... from Context
+
+    ``Context`` is an abstract schema -- ``Project`` is itself a Context, so
+    there is no ``project`` attribute on the base -- and the server answered
+    ``ParseError(No attribute 'project' exists for schema 'Context')``. That
+    took the whole integration down at start-up.
+    '''
+
+    def setUp(self):
+        self.task = make_task()
+        self.session = FakeSession(entities={'task-1': self.task})
+        self._env = ContextEnvironment().__enter__()
+        self.addCleanup(self._env.__exit__)
+
+    def test_context_is_fetched_with_get(self):
+        store = ContextStore(self.session, config_path=None)
+        store.set_context('task-1')
+
+        self.assertEqual(self.session.gets, [('Context', 'task-1')])
+
+    def test_no_query_projects_attributes_off_the_context_schema(self):
+        store = ContextStore(self.session, config_path=None)
+        store.set_context('task-1')
+
+        for query in self.session.queries:
+            self.assertNotIn(
+                'from Context',
+                query,
+                'Context must be fetched with session.get, not projected: '
+                '{0}'.format(query),
+            )
+
+    def test_a_server_error_yields_none_rather_than_propagating(self):
+        session = FakeSession()
+        session.get_error = RuntimeError(
+            "Server reported error: ParseError(No attribute 'project' "
+            "exists for schema 'Context'.)"
+        )
+        store = ContextStore(session, config_path=None)
+
+        self.assertIsNone(store.set_context('task-1'))
+        self.assertIsNone(store.context_id)
+
+    def test_label_survives_an_entity_that_raises_on_access(self):
+        class ExplodingEntity(dict):
+            def __getitem__(self, key):
+                if key in ('link', 'name'):
+                    raise RuntimeError('server gone')
+                return dict.__getitem__(self, key)
+
+        entity = ExplodingEntity(id='task-9')
+        store = ContextStore(FakeSession(), config_path=None)
+        store.set_context(entity)
+
+        self.assertEqual(store.label(), 'task-9')
 
 
 class TestQueryUserTasks(unittest.TestCase):
