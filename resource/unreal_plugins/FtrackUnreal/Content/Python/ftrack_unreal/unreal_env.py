@@ -39,24 +39,30 @@ def get_config_path() -> str:
     return os.path.join(project_saved_dir(), 'Config', 'ftrack.ini')
 
 
-def get_publish_dir(asset_name: str, version: int) -> str:
-    '''Return (and create) the export directory for a publish.
+def get_export_dir(asset_name: str) -> str:
+    '''Return (and create) the staging directory for one publish.
 
-    Args:
-        asset_name: ftrack asset name.
-        version: Version number being published.
+    ``<Project>/Saved/ftrack/publish/<asset_name>``.
 
-    Returns:
-        ``<Project>/Saved/ftrack/publish/<asset_name>_v###``.
+    Deliberately not named after the version: ftrack assigns the version number
+    on commit, so it is not known while the files are being written. These are
+    staging files -- once published, the component lives in the ftrack location
+    and this copy is only of interest when a publish goes wrong.
     '''
     path = os.path.join(
-        project_saved_dir(),
-        'ftrack',
-        'publish',
-        '{0}_v{1:03d}'.format(asset_name, version),
+        project_saved_dir(), 'ftrack', 'publish', _sanitise(asset_name)
     )
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _sanitise(name: str) -> str:
+    '''Return *name* reduced to characters that are safe in a path.'''
+    cleaned = ''.join(
+        character if character.isalnum() or character in '-_' else '_'
+        for character in (name or '').strip()
+    )
+    return cleaned or 'unnamed'
 
 
 def get_thumbnail_cache_dir() -> str:

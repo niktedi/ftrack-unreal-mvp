@@ -95,6 +95,37 @@ def get_shared_session(auto_connect_event_hub: bool = False) -> Any:
     return _session
 
 
+def create_worker_session() -> Any:
+    '''Return a fresh session for use on a worker thread.
+
+    An ``ftrack_api.Session`` is not safe to use from more than one thread, and
+    the shared one belongs to the game thread. Anything published or queried off
+    a background thread gets its own.
+
+    Credentials and the event plugin path come from the environment, so this
+    session picks up the same storage locations as the shared one.
+
+    Raises:
+        FtrackSessionError: If credentials are missing or the server refuses.
+    '''
+    missing = _missing_credentials()
+    if missing:
+        raise FtrackSessionError(
+            'ftrack credentials are missing from the environment ({0}).'.format(
+                ', '.join(missing)
+            )
+        )
+
+    import ftrack_api
+
+    try:
+        return ftrack_api.Session(auto_connect_event_hub=False)
+    except Exception as error:
+        raise FtrackSessionError(
+            'Could not connect to ftrack: {0}'.format(error)
+        )
+
+
 def reset_shared_session() -> None:
     '''Close and forget the shared session.'''
     global _session

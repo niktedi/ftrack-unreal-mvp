@@ -61,16 +61,25 @@ TOOLS = (
 
 
 def _open_tool(name: str, label: str, phase: str) -> Callable[[], None]:
-    '''Return the menu action that opens the window for *name*.'''
+    '''Return the menu action that opens the window for *name*.
+
+    Tools that are not built yet fall back to the placeholder, which reports
+    live integration status rather than an empty box.
+    '''
 
     def action() -> None:
         from .ui import placeholder, qt_app
 
-        qt_app.show(
-            name,
-            placeholder.make_factory(label, phase, _session, _context_store),
-            'ftrack - {0}'.format(label),
-        )
+        if name == 'publish':
+            from .ui import publish_window
+
+            factory = publish_window.make_factory(_session, _context_store)
+        else:
+            factory = placeholder.make_factory(
+                label, phase, _session, _context_store
+            )
+
+        qt_app.show(name, factory, 'ftrack - {0}'.format(label))
 
     return action
 
