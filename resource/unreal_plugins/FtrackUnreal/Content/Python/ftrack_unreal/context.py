@@ -1,0 +1,214 @@
+# :coding: utf-8
+# :copyright: Copyright (c) 2026 Mroya
+
+'''Current ftrack task context.
+
+Resolution order at startup:
+
+1. ``FTRACK_CONTEXTID`` -- set by the Connect hook, authoritative for this
+   launch.
+2. The context persisted by a previous *Change Context*, so a plain restart of
+   the editor does not lose the task.
+
+The store is pure Python; the path of the config file is injected by the caller
+(``unreal_env.get_config_path()`` supplies ``<Project>/Saved/Config/ftrack.ini``
+inside the editor).
+'''
+
+from __future__ import annotations
+
+import configparser
+import os
+from typing import Any, Callable, List, Optional
+
+from .logs import get_logger
+
+logger = get_logger(__name__)
+
+CONFIG_SECTION = 'ftrack'
+CONFIG_KEY = 'context_id'
+
+#: Projection used everywhere a context entity is fetched.
+CONTEXT_PROJECTION = (
+    'select id, name, link, project.id, project.name, project.full_name, '
+    'parent.id, parent.name from Context where id is "{0}"'
+)
+
+
+class ContextStore:
+    '''Holds the current task and notifies listeners when it changes.'''
+
+    def __init__(self, session: Any, config_path: Optional[str] = None) -> None:
+        '''Initialise the store.
+
+        Args:
+            session: An ``ftrack_api.Session``.
+            config_path: Where to persist the context id. ``None`` disables
+                persistence (used by the tests).
+        '''
+        self._session = session
+        self._config_path = config_path
+        self._context_id: Optional[str] = None
+        self._entity: Optional[Any] = None
+        self._listeners: List[Callable[[Optional[Any]], None]] = []
+
+    # -- resolution ---------------------------------------------------------
+
+    def resolve(self) -> Optional[Any]:
+        '''Resolve the startup context and return the entity, or ``None``.'''
+        context_id = os.environ.get('FTRACK_CONTEXTID') or self._read_config()
+
+        if not context_id:
+            logger.warning(
+                'No ftrack context available. Launch from Connect with a task '
+                'selected, or use ftrack > Change Context.'
+            )
+            return None
+
+        return self.set_context(context_id, persist=False)
+
+    # -- accessors ----------------------------------------------------------
+
+    @property
+    def context_id(self) -> Optional[str]:
+        '''Id of the current context, or ``None``.'''
+        return self._context_id
+
+    @property
+    def entity(self) -> Optional[Any]:
+        '''The current context entity, or ``None``.'''
+        return self._entity
+
+    def set_context(self, context: Any, persist: bool = True) -> Optional[Any]:
+        '''Make *context* current and notify listeners.
+
+        Args:
+            context: A context entity or an entity id.
+            persist: Whether to write the id to the config file.
+
+        Returns:
+            The resolved entity, or ``None`` when the id could not be fetched.
+        '''
+        if isinstance(context, str):
+            entity = self._session.query(
+                CONTEXT_PROJECTION.format(context)
+            ).first()
+            if entity is None:
+                logger.error(
+                    'Context %s does not exist or is not visible to %s.',
+                    context,
+                    self._session.api_user,
+                )
+                return None
+        else:
+            entity = context
+
+        self._entity = entity
+        self._context_id = entity['id']
+
+        # Keep the environment in step so anything spawned from the editor
+        # inherits the same context.
+        os.environ['FTRACK_CONTEXTID'] = self._context_id
+
+        if persist:
+            self._write_config(self._context_id)
+
+        logger.info('Context set to %s', self.label())
+        self._notify()
+        return entity
+
+    def label(self) -> str:
+        '''Return ``Project / Shot / Task`` for the current context.'''
+        if self._entity is None:
+            return 'no context'
+
+        link = self._entity.get('link') or []
+        if link:
+            return ' / '.join(item['name'] for item in link)
+
+        return self._entity['name']
+
+    # -- listeners ----------------------------------------------------------
+
+    def subscribe(self, callback: Callable[[Optional[Any]], None]) -> None:
+        '''Call *callback* with the new entity whenever the context changes.'''
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def unsubscribe(self, callback: Callable[[Optional[Any]], None]) -> None:
+        '''Stop notifying *callback*.'''
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
+    def _notify(self) -> None:
+        for callback in list(self._listeners):
+            try:
+                callback(self._entity)
+            except Exception:
+                # A broken listener must not take the context change with it.
+                logger.exception('Context change listener failed.')
+
+    # -- persistence --------------------------------------------------------
+
+    def _read_config(self) -> Optional[str]:
+        if not self._config_path or not os.path.isfile(self._config_path):
+            return None
+
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(self._config_path, encoding='utf-8')
+            return parser.get(CONFIG_SECTION, CONFIG_KEY, fallback=None)
+        except Exception as error:
+            logger.warning(
+                'Could not read %s: %s (non-critical)',
+                self._config_path,
+                error,
+            )
+            return None
+
+    def _write_config(self, context_id: str) -> None:
+        if not self._config_path:
+            return
+
+        parser = configparser.ConfigParser()
+        try:
+            if os.path.isfile(self._config_path):
+                parser.read(self._config_path, encoding='utf-8')
+            if not parser.has_section(CONFIG_SECTION):
+                parser.add_section(CONFIG_SECTION)
+            parser.set(CONFIG_SECTION, CONFIG_KEY, context_id)
+
+            directory = os.path.dirname(self._config_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(self._config_path, 'w', encoding='utf-8') as handle:
+                parser.write(handle)
+        except Exception as error:
+            logger.warning(
+                'Could not persist context to %s: %s (non-critical)',
+                self._config_path,
+                error,
+            )
+
+
+def query_user_tasks(session: Any, project_id: Optional[str] = None) -> List[Any]:
+    '''Return open tasks assigned to the session's user.
+
+    Args:
+        session: An ``ftrack_api.Session``.
+        project_id: Restrict to a single project when given.
+
+    Returns:
+        A list of ``Task`` entities.
+    '''
+    query = (
+        'select id, name, link, project.id, project.name, project.full_name, '
+        'parent.id, parent.name, status.name from Task '
+        'where assignments any (resource.username is "{0}") '
+        'and status.state.name not_in ("Done", "Blocked")'
+    ).format(session.api_user)
+
+    if project_id:
+        query += ' and project.id is "{0}"'.format(project_id)
+
+    return session.query(query).all()

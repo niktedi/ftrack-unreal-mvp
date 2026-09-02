@@ -1,0 +1,34 @@
+# Runtime dependencies vendored into dependencies/ and put on Unreal's sys.path
+# through UE_PYTHONPATH by hook/discover_ftrack_unreal.py.
+#
+# Unreal's embedded interpreter ships nothing but pip and setuptools, so
+# ftrack_api and its whole transitive closure have to travel with the plugin.
+# Everything here is pure Python, which is why one dependencies/ folder serves
+# both UE 5.5 and UE 5.7 (both Python 3.11.8).
+#
+# Installed with --no-deps on purpose: ftrack-python-api 3.1.0 declares
+# `sphinx-notfound-page` as a runtime requirement, which is a packaging mistake
+# upstream -- nothing under ftrack_api/ imports it, but pip resolves it into the
+# whole of Sphinx, 66 MB of docs tooling. So the real closure is pinned here by
+# hand. It matches the studio's dep_common bundle.
+#
+# Build with: python scripts/build_dependencies.py --clean
+
+ftrack-python-api==3.1.0
+
+# Direct requirements of ftrack_api.
+arrow>=0.4.4,<1
+clique==1.6.1
+platformdirs>=4.0.0,<5
+pyparsing>=2.0,<3
+requests>=2,<3
+websocket-client>=0.40.0,<1
+
+# Transitive: requests -> certifi/charset-normalizer/idna/urllib3,
+# arrow -> python-dateutil -> six.
+certifi>=2024.2.2
+charset-normalizer>=3.3,<4
+idna>=3.6,<4
+urllib3>=2.0,<3
+python-dateutil>=2.8,<3
+six>=1.16,<2

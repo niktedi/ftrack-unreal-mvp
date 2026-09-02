@@ -1,0 +1,49 @@
+# :coding: utf-8
+# :copyright: Copyright (c) 2026 Mroya
+#
+# Connect 3 launcher config. Discovered by ftrack_connect's DiscoverApplications
+# from every <plugin>/launch folder on FTRACK_CONNECT_PLUGIN_PATH.
+#
+# `name` here must stay equal to NAME in hook/discover_ftrack_unreal.py -- Connect
+# matches the two when merging the hook's environment into the launch, and drops
+# every variable silently when they differ.
+
+type: launch_config
+name: ftrack-unreal
+priority: 100
+context:
+  - Task
+identifier: ftrack-launch-unreal
+applicationIdentifier: unreal_{variant}
+integrations:
+  framework:
+    - ftrack-unreal
+label: Unreal Engine
+icon: unreal-engine
+variant: "{version}"
+search_path:
+  windows:
+    # Bounded os.walk: one regex per directory level below the prefix.
+    # C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe
+    prefix:
+      - C:\
+      - Program Files.*
+    expression:
+      - Epic Games
+      - UE_.*
+      - Engine
+      - Binaries
+      - Win64
+      - UnrealEditor.exe
+    version_expression: 'UE_(?P<version>[\d.]+)'
+  linux:
+    prefix:
+      - "/"
+      - opt
+    expression:
+      - UE_.*
+      - Engine
+      - Binaries
+      - Linux
+      - UnrealEditor
+    version_expression: 'UE_(?P<version>[\d.]+)'
