@@ -72,6 +72,13 @@ def make_item(entity_type, entity_id, label):
 # array of Objects, On Get Item Children hands you one item and an out array to
 # fill, and the row widget receives the item through On List Item Object Set.
 # So the three functions below are shaped the way the real ui_bridge will be.
+#
+# The two array-returning functions return Array(Object), not
+# Array(FtrackSpikeTreeItem), on purpose. The engine signatures are
+# `TArray<UObject*>` (UTreeView::SetListItems, and the Children out param of
+# FOnGetItemChildrenDynamic), and Blueprint will not silently convert an array
+# of a derived type into an array of the base -- returning the base type is what
+# makes the pins connect without a per-element rebuild.
 # ---------------------------------------------------------------------------
 
 @unreal.uclass()
@@ -80,7 +87,7 @@ class FtrackSpikeLibrary(unreal.BlueprintFunctionLibrary):
 
     @unreal.ufunction(
         static=True,
-        ret=unreal.Array(FtrackSpikeTreeItem),
+        ret=unreal.Array(unreal.Object),
         meta=dict(Category='ftrack|Spike'),
     )
     def get_root_items():
@@ -92,7 +99,7 @@ class FtrackSpikeLibrary(unreal.BlueprintFunctionLibrary):
 
     @unreal.ufunction(
         static=True,
-        ret=unreal.Array(FtrackSpikeTreeItem),
+        ret=unreal.Array(unreal.Object),
         params=[FtrackSpikeTreeItem],
         meta=dict(Category='ftrack|Spike'),
     )
@@ -160,9 +167,13 @@ B. The tool window
     Entry Widget Class = WBP_SpikeRow.
  8. In the graph: Event Pre Construct (or Event Construct) ->
     Get Root Items -> TreeView Set List Items.
- 9. Select the TreeView, and in Details -> Events add On Get Item Children.
-    In that event: cast the Item pin to FtrackSpikeTreeItem ->
-    Get Item Children -> assign the result to the Children out pin.
+ 9. Select the TreeView, Details -> Events -> On Get Item Children (green +).
+    The event node has an Item input and a Children output. Children is a
+    by-ref TArray<UObject*>, so you fill it rather than return it:
+        Item -> Cast To FtrackSpikeTreeItem -> Get Item Children
+        -> Append (Target = the event's Children pin, Source = that result)
+    If Blueprint refuses to let you write to Children, stop and record it --
+    that alone is a reason to take the C++ fallback for the tree.
 10. On the button's OnClicked: Get Item Label of any item -> Print String.
 11. SAVE both assets.  <-- the step that can fail
 12. Run the widget: right click EUW_Spike -> Run Editor Utility Widget.
