@@ -2,9 +2,10 @@
 # through UE_PYTHONPATH by hook/discover_ftrack_unreal.py.
 #
 # Unreal's embedded interpreter ships nothing but pip and setuptools, so
-# ftrack_api and its whole transitive closure have to travel with the plugin.
-# Everything here is pure Python, which is why one dependencies/ folder serves
-# both UE 5.5 and UE 5.7 (both Python 3.11.8).
+# ftrack_api, Qt and their transitive closure have to travel with the plugin.
+# One dependencies/ folder serves both UE 5.5 and UE 5.7 because both embed
+# Python 3.11.8 -- but the build must run under Unreal's own interpreter, since
+# PySide6 and charset_normalizer ship cp311 binaries.
 #
 # Installed with --no-deps on purpose: ftrack-python-api 3.1.0 declares
 # `sphinx-notfound-page` as a runtime requirement, which is a packaging mistake
@@ -32,3 +33,14 @@ idna>=3.6,<4
 urllib3>=2.0,<3
 python-dateutil>=2.8,<3
 six>=1.16,<2
+
+# The UI. PySide6-Essentials rather than the full PySide6: it leaves out Qt3D,
+# Charts, Multimedia, WebEngine and the rest, none of which a pipeline tool
+# needs, and that is the difference between ~213 MB and well over half a GB.
+# shiboken6 is pinned to the matching version by hand because --no-deps means
+# pip will not resolve it for us.
+#
+# Unreal ships no Qt of its own, so unlike Maya there is no host Qt version to
+# match and no DLL to collide with.
+PySide6-Essentials==6.11.2
+shiboken6==6.11.2

@@ -9,14 +9,17 @@ Targets ftrack Connect 24.11.0 and Unreal Engine 5.5 / 5.7 (Python 3.11.8).
 
 | Phase | | |
 |---|---|---|
-| 0 | Spike: UMG ↔ Python bridge | automated half **passed**, manual half pending |
+| 0 | Spike: UMG ↔ Python bridge | done, then **superseded** — UI moved to PySide6 |
 | 1 | Launch from Connect + menu | done |
+| 1.5 | Qt running in the editor process | done |
 | 2 | Publish — camera → FBX | not started |
 | 3 | Asset Manager | not started |
 | 4 | Change Context | not started |
 
-The three menu items exist and are wired; Publish, Asset Manager and Change
-Context currently answer with "not available yet".
+All three menu items open a real Qt window. Each currently shows a placeholder
+that reports live integration status — user, server, context, engine — so opening
+any of them checks the whole chain end to end. Phases 2 to 4 replace them one at
+a time.
 
 ## Install
 
@@ -48,11 +51,11 @@ Nothing has to be copied into an Unreal project — see *How it works* below.
 ```
 hook/                Connect side: discover + launch subscribers
 launch/              launch_config yaml (where UnrealEditor.exe is found)
-dependencies/        vendored ftrack_api and its closure (built, not in git)
+dependencies/        vendored ftrack_api + PySide6 (built, not in git, ~217 MB)
 resource/
   unreal_plugins/    <- UE_ADDITIONAL_PLUGIN_PATHS points here
-    FtrackUnreal/    the Unreal plugin: .uplugin, Content/UI, Content/Python
-scripts/             build_dependencies.py, spike_umg_bridge.py
+    FtrackUnreal/    the Unreal plugin: .uplugin, Content/Python
+scripts/             build_dependencies.py
 tests/               pure-layer tests, no Unreal required
 ```
 
@@ -102,7 +105,7 @@ no engine install.
 |---|---|
 | `session.py` | `unreal_env.py` |
 | `context.py` | `menu.py` |
-| `publish/publisher.py` | `ui_bridge.py` |
+| `publish/publisher.py` | `ui/qt_app.py` |
 | `asset_manager/tree_model.py` | `publish/camera_fbx.py`, `publish/thumbnail.py` |
 | | `asset_manager/details.py` |
 
@@ -132,6 +135,25 @@ anything spawned from the editor inherits the same context. Listeners registered
 through `subscribe()` are how the menu label and (from phase 4) the open windows
 follow a context change; a listener that raises is logged and skipped rather than
 being allowed to abort the change.
+
+### Qt in the editor process
+
+`ui/qt_app.py` owns the runtime. Three rules, and breaking any of them costs you
+the editor rather than just the tool:
+
+- **Never call `QApplication.exec()`** — it would take the thread. The event loop
+  is pumped one slice per frame from `unreal.register_slate_post_tick_callback`,
+  which fires on the game thread.
+- **`setQuitOnLastWindowClosed(False)`** — otherwise closing the last ftrack
+  window shuts Qt down for the whole editor session.
+- **Parent windows to Slate** via `unreal.parent_external_window_to_slate`, so
+  they stay in front of the editor and minimise with it.
+
+`qt_app.show(name, factory, title)` is the single entry point: it creates the
+application once, keeps one window per tool name (a second menu click raises the
+existing one), and holds the only Python reference so the window is not
+collected. If the pump ever raises it logs once and detaches, rather than
+producing a traceback per frame.
 
 ### Threading and errors
 
@@ -185,15 +207,36 @@ it (`FPlugin::IsEnabledByDefault`, line 412). Then, from
 `PYTHONPATH` is not usable — `:966` sets `Py_IgnoreEnvironmentFlag` when the
 interpreter runs isolated, which is the default.
 
-**Native UMG, not PySide.** Decided against the studio's established pattern
-(external PySide6 process + TCP JSON-RPC, as in `mroya-nuke` and
-`ftrack_framework_blender`) and against running PySide6 inside the editor. Cost
-accepted: `.uasset` files are binary in git. Fallback if phase 0's manual half
-fails: a thin C++ module providing `UFtrackTreeItem : UObject` and
-`UFtrackBridge : UBlueprintFunctionLibrary` forwarding into Python via
-`IPythonScriptPlugin::Get()->ExecPythonCommandEx`, so the Blueprints reference
-C++ classes and the Python data layer is untouched — at the cost of a build per
-engine version.
+**PySide6 in the editor process, not native UMG.** This reverses the original
+brief. UMG was tried first and the risk that worried us turned out to be small
+(see *Phase 0* below), but the case for Qt got stronger the closer we looked:
+
+- Every UMG window with a list needs at least two assets — the window and a row
+  widget implementing `UserObjectListEntry` — built by clicking in the editor,
+  and stored as binary `.uasset`. No diff, no merge, no review, and nothing an
+  assistant can write for you.
+- Qt makes the UI ordinary code: reviewable, diffable, and testable.
+- The studio already has a PySide6 stack aimed at exactly this. `ftrack_inout`'s
+  browser widget takes `dcc="unreal"` with `on_import_to_unreal` /
+  `on_create_handle` callbacks, and `browser/dcc/ue5/__init__.py` is an empty
+  adapter left deliberately for filling in. Whether to adopt it for the Asset
+  Manager is a phase 3 question, still open.
+- The 213 MB objection dissolved when `dependencies/` left git: it is now
+  download weight, not repository weight.
+
+Measured before committing to it, inside a real editor process: PySide6 6.11.2
+imports under Unreal's interpreter, `QApplication` is created with the `windows`
+platform plugin, a `QTreeWidget` builds, `processEvents` does not block, and
+`register_slate_post_tick_callback` round-trips. Unreal ships **no Qt of its
+own**, so there is no host version to match and no DLL to collide with — which
+is why Nuke and Blender needed a separate UI process here and Unreal does not.
+
+Given up: the windows float rather than docking as editor tabs.
+`unreal.parent_external_window_to_slate` makes the editor their owner, so they
+stay in front of it and minimise with it, but they are not tabs. A careless
+modal dialog can also still freeze the editor.
+
+The menu stays native `unreal.ToolMenus` either way.
 
 **Own publisher, not `ftrack_inout`.** `publish/publisher.py` talks to
 `ftrack_api` directly; nothing is imported across the plugin path. Given up by
@@ -224,7 +267,7 @@ retained in `menu._entries`. Both guard the same failure: objects handed to
 instance state surviving the round trip is a menu item that silently stops
 working.
 
-### Phase 0 result (automated half)
+### Phase 0 result (superseded, kept for the record)
 
 `scripts/spike_umg_bridge.py` on UE 5.5. All four checks pass: static
 `ufunction`s on a Python `BlueprintFunctionLibrary` are callable, `uproperty`
@@ -259,17 +302,15 @@ Consequences, and they are mild:
   `ui_bridge` must be imported eagerly from `bootstrap.bootstrap()`, never lazily
   on first menu click.
 
-**Still open — the manual half.** Two throwaway assets, built by hand:
-`WBP_SpikeRow` (a User Widget implementing `UserObjectListEntry`, which draws one
-row) and `EUW_Spike` (an Editor Utility Widget holding the `TreeView`). Wire them
-to the Python nodes, **save**, restart the editor, reopen. That is what proves
-the editor will serialise such a Blueprint at all, and that a `TreeView` will
-drive a Python-defined item type — neither is answerable from Python. Run
-`py "…/scripts/spike_umg_bridge.py"` in the editor; it prints the full steps.
+**The manual half was never run.** It would have proven that the editor can
+serialise such a Blueprint and that a `TreeView` drives a Python-defined item
+type. With the UI on Qt, neither question is on the path any more, and
+`scripts/spike_umg_bridge.py` was deleted — it is in the history at `915a8ff`
+if the C++/UMG fallback ever comes back.
 
-A later rewrite of `spike_umg_bridge.py` — classes reordered, functions replaced
-— left the class path at `_0xFFE4DAAF`, which re-confirms the table above from a
-real edit rather than a synthetic one.
+The findings still hold, and would still apply to that fallback. Two rewrites of
+the spike file left the class path at `_0xFFE4DAAF`, confirming the table above
+from real edits rather than synthetic ones.
 
 ---
 

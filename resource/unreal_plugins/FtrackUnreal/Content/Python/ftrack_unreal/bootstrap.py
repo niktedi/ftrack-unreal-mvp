@@ -52,29 +52,37 @@ def get_context_store() -> Optional[ContextStore]:
     return _context_store
 
 
-def _not_implemented(tool: str) -> Callable[[], None]:
-    '''Return a placeholder action for a window that is not built yet.'''
+#: Menu key -> (window title, the phase that replaces the placeholder).
+TOOLS = (
+    ('publish', 'Publish', 'phase 2'),
+    ('asset_manager', 'Asset Manager', 'phase 3'),
+    ('change_context', 'Change Context', 'phase 4'),
+)
+
+
+def _open_tool(name: str, label: str, phase: str) -> Callable[[], None]:
+    '''Return the menu action that opens the window for *name*.'''
 
     def action() -> None:
-        from . import unreal_env
+        from .ui import placeholder, qt_app
 
-        unreal_env.show_message(
-            'ftrack',
-            '{0} is not available yet -- it arrives in a later phase of the '
-            'integration.'.format(tool),
+        qt_app.show(
+            name,
+            placeholder.make_factory(label, phase, _session, _context_store),
+            'ftrack - {0}'.format(label),
         )
 
     return action
 
 
 def _build_actions() -> Dict[str, Callable[[], None]]:
-    '''Return the menu actions available in this build.'''
-    # Phase 2 replaces `publish`, phase 3 `asset_manager`, phase 4
-    # `change_context`.
+    '''Return the menu actions available in this build.
+
+    Every tool currently opens the placeholder window; phases 2 to 4 swap the
+    factories out one at a time.
+    '''
     return {
-        'publish': _not_implemented('Publish'),
-        'asset_manager': _not_implemented('Asset Manager'),
-        'change_context': _not_implemented('Change Context'),
+        name: _open_tool(name, label, phase) for name, label, phase in TOOLS
     }
 
 
@@ -99,6 +107,16 @@ def bootstrap(level: int = logging.INFO) -> bool:
 
     logger.info('engine %s', unreal_env.engine_version_short())
 
+    from .ui import qt_app
+
+    if not qt_app.is_available():
+        # The menu is still built; each item then explains itself when clicked.
+        logger.error(
+            'PySide6 is missing from the vendored dependencies. Run '
+            'scripts/build_dependencies.py in the plugin folder and restart '
+            'Unreal -- the ftrack windows will not open until you do.'
+        )
+
     _context_store = ContextStore(_session, unreal_env.get_config_path())
     _context_store.resolve()
     logger.info(
@@ -120,11 +138,13 @@ def bootstrap(level: int = logging.INFO) -> bool:
 
 
 def shutdown() -> None:
-    '''Tear the integration down: menu, context store and session.'''
+    '''Tear the integration down: windows, menu, context store and session.'''
     global _session, _context_store, _bootstrapped
 
     from . import menu
+    from .ui import qt_app
 
+    qt_app.shutdown()
     menu.remove()
     _context_store = None
     reset_shared_session()
