@@ -105,6 +105,11 @@ class TreeModel:
     def root(self) -> Optional[Node]:
         return self._root
 
+    @property
+    def session(self) -> Any:
+        '''The session this model reads through.'''
+        return self._session
+
     # -- loading ------------------------------------------------------------
 
     def load(self, project_id: str) -> Node:
@@ -187,27 +192,33 @@ class TreeModel:
             node.children = []
             return node.children
 
-        node.children = self._load_versions(node)
-        self._reindex()
+        self.attach_versions(node, self.fetch_versions(node.entity_id, node.label))
         return node.children
 
-    def _load_versions(self, asset_node: Node) -> List[Node]:
+    def fetch_versions(self, asset_id: str, asset_label: str = '') -> List[Node]:
+        '''Return version nodes for *asset_id* without touching the tree.
+
+        Split out from :meth:`load_children` so the window can run it on a
+        worker thread -- with a session of its own -- and attach the result on
+        the game thread with :meth:`attach_versions`.
+        '''
         try:
             versions = self._session.query(
-                VERSIONS_PROJECTION.format(asset_node.entity_id)
+                VERSIONS_PROJECTION.format(asset_id)
             ).all()
         except Exception as error:
             logger.error(
-                'Could not read versions of %s: %s', asset_node.label, error
+                'Could not read versions of %s: %s', asset_label or asset_id,
+                error,
             )
             raise TreeError(
                 'Could not read the versions of {0}: {1}'.format(
-                    asset_node.label, error
+                    asset_label or asset_id, error
                 )
             )
 
         logger.debug(
-            'Loaded %d version(s) of %s', len(versions), asset_node.label
+            'Loaded %d version(s) of %s', len(versions), asset_label or asset_id
         )
         return [
             Node(
@@ -223,12 +234,17 @@ class TreeModel:
                     'comment': version['comment'] or '',
                     'is_latest': version['is_latest_version'],
                     'thumbnail_id': version['thumbnail_id'],
-                    'asset_name': asset_node.label,
+                    'asset_name': asset_label,
                 },
                 children=[],
             )
             for version in versions
         ]
+
+    def attach_versions(self, asset_node: Node, versions: List[Node]) -> None:
+        '''Hang *versions* under *asset_node* and refresh the id index.'''
+        asset_node.children = versions
+        self._reindex()
 
     def invalidate(self, node: Node) -> None:
         '''Forget an asset's versions so the next expand refetches them.'''

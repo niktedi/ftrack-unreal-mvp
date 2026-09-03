@@ -73,6 +73,12 @@ def _open_tool(name: str, label: str, phase: str) -> Callable[[], None]:
             from .ui import publish_window
 
             factory = publish_window.make_factory(_session, _context_store)
+        elif name == 'asset_manager':
+            from .ui import asset_manager_window
+
+            factory = asset_manager_window.make_factory(
+                _session, _context_store
+            )
         else:
             factory = placeholder.make_factory(
                 label, phase, _session, _context_store
