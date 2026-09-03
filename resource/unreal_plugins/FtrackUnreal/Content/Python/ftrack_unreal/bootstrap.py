@@ -8,6 +8,7 @@ Called once from ``init_unreal.py``. Re-running it is safe and is what the
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import sys
@@ -51,52 +52,42 @@ def get_context_store() -> Optional[ContextStore]:
     return _context_store
 
 
-#: Menu key -> (window title, the phase that replaces the placeholder).
+#: Menu key -> window title, and the module under `ui` that builds it.
 TOOLS = (
-    ('publish', 'Publish', 'phase 2'),
-    ('asset_manager', 'Asset Manager', 'phase 3'),
-    ('change_context', 'Change Context', 'phase 4'),
+    ('publish', 'Publish', 'publish_window'),
+    ('asset_manager', 'Asset Manager', 'asset_manager_window'),
+    ('change_context', 'Change Context', 'change_context_window'),
 )
 
 
-def _open_tool(name: str, label: str, phase: str) -> Callable[[], None]:
+def _open_tool(name: str, label: str, module_name: str) -> Callable[[], None]:
     '''Return the menu action that opens the window for *name*.
 
-    Tools that are not built yet fall back to the placeholder, which reports
-    live integration status rather than an empty box.
+    The window module is imported at click time rather than at start-up: it
+    pulls in PySide6, and an editor started outside Connect should still get a
+    menu that explains itself instead of failing to load.
     '''
 
     def action() -> None:
-        from .ui import placeholder, qt_app
+        from .ui import qt_app
 
-        if name == 'publish':
-            from .ui import publish_window
-
-            factory = publish_window.make_factory(_session, _context_store)
-        elif name == 'asset_manager':
-            from .ui import asset_manager_window
-
-            factory = asset_manager_window.make_factory(
-                _session, _context_store
-            )
-        else:
-            factory = placeholder.make_factory(
-                label, phase, _session, _context_store
-            )
-
-        qt_app.show(name, factory, 'ftrack - {0}'.format(label))
+        module = importlib.import_module(
+            '.ui.{0}'.format(module_name), __package__
+        )
+        qt_app.show(
+            name,
+            module.make_factory(_session, _context_store),
+            'ftrack - {0}'.format(label),
+        )
 
     return action
 
 
 def _build_actions() -> Dict[str, Callable[[], None]]:
-    '''Return the menu actions available in this build.
-
-    Tools not built yet open the placeholder; phases 3 and 4 swap those
-    factories out one at a time.
-    '''
+    '''Return the menu actions.'''
     actions = {
-        name: _open_tool(name, label, phase) for name, label, phase in TOOLS
+        name: _open_tool(name, label, module_name)
+        for name, label, module_name in TOOLS
     }
     actions['reload'] = reload_integration
     return actions
