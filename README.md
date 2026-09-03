@@ -12,14 +12,14 @@ Targets ftrack Connect 24.11.0 and Unreal Engine 5.5 / 5.7 (Python 3.11.8).
 | 0 | Spike: UMG ↔ Python bridge | done, then **superseded** — UI moved to PySide6 |
 | 1 | Launch from Connect + menu | done |
 | 1.5 | Qt running in the editor process | done |
-| 2 | Publish — camera → FBX | not started |
-| 3 | Asset Manager | not started |
-| 4 | Change Context | not started |
+| 2 | Publish — camera → FBX | done |
+| 3 | Asset Manager | done |
+| 4 | Change Context | done |
 
-All three menu items open a real Qt window. Each currently shows a placeholder
-that reports live integration status — user, server, context, engine — so opening
-any of them checks the whole chain end to end. Phases 2 to 4 replace them one at
-a time.
+The MVP is feature-complete: the three menu items open working windows, plus
+*Reload integration*, which re-reads the Python without restarting the editor.
+Importing and updating assets is the next phase and is not started — the Asset
+Manager's Import and Update buttons are disabled with a tooltip saying so.
 
 ## Install
 
@@ -55,7 +55,7 @@ dependencies/        vendored ftrack_api + PySide6 (built, not in git, ~217 MB)
 resource/
   unreal_plugins/    <- UE_ADDITIONAL_PLUGIN_PATHS points here
     FtrackUnreal/    the Unreal plugin: .uplugin, Content/Python
-scripts/             build_dependencies.py
+scripts/             build_dependencies.py, and the verify_* editor checks
 tests/               pure-layer tests, no Unreal required
 ```
 
@@ -340,6 +340,24 @@ cd tests && python -m unittest discover
 ```
 
 pytest picks the same tests up (`pytest tests/`) if it is installed.
+
+Qt inside Unreal cannot be reached from pytest, and the Slate tick does not run
+in a commandlet, so the rest is checked by scripts run from the editor's Python
+console. Each prints a pass/fail list and cleans up after itself:
+
+| script | needs ftrack? | covers |
+|---|---|---|
+| `verify_camera_export.py` | no | builds a throwaway sequence, exports a real FBX |
+| `verify_publish_window.py` | no | the Publish form: validation, name clashes, refresh on reopen |
+| `verify_asset_manager.py` | **yes** | the tree queries, lazy versions, details, preview cache |
+| `verify_change_context.py` | **yes** | the switch and its consequences, then switches back |
+
+The two that need ftrack are read-only against the server. Run them in an Unreal
+started from Connect with a task selected:
+
+```
+py "C:/mrpipe/ftrack_plugins/ftrack-unreal-mvp/scripts/verify_asset_manager.py"
+```
 
 ## Troubleshooting
 
