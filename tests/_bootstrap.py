@@ -1,5 +1,4 @@
 # :coding: utf-8
-# :copyright: Copyright (c) 2026 Mroya
 
 '''Put the in-editor Python package on ``sys.path`` for the tests.
 

@@ -1,5 +1,4 @@
 # :coding: utf-8
-# :copyright: Copyright (c) 2026 Mroya
 
 '''Capturing the viewport as a preview image for the published version.
 

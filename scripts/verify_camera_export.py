@@ -1,5 +1,4 @@
 # :coding: utf-8
-# :copyright: Copyright (c) 2026 Mroya
 
 '''Check the camera export path against a real editor.
 

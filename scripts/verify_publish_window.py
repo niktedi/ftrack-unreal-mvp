@@ -1,5 +1,4 @@
 # :coding: utf-8
-# :copyright: Copyright (c) 2026 Mroya
 
 '''Check the Publish window against a real editor.
 

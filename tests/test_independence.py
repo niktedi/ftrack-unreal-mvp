@@ -1,5 +1,4 @@
 # :coding: utf-8
-# :copyright: Copyright (c) 2026 Mroya
 
 '''The plugin must not depend on any other plugin on the Connect plugin path.
 

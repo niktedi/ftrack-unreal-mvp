@@ -1,5 +1,4 @@
 # :coding: utf-8
-# :copyright: Copyright (c) 2026 Mroya
 #
 # Connect 3 launcher config. Discovered by ftrack_connect's DiscoverApplications
 # from every <plugin>/launch folder on FTRACK_CONNECT_PLUGIN_PATH.
