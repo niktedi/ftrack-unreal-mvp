@@ -42,6 +42,7 @@ def create(session: Any, context_store: Any) -> Any:
     '''Build the Publish window.'''
     from PySide6 import QtCore, QtGui, QtWidgets
 
+    from . import theme
     from .. import async_utils, unreal_env
     from ..publish import camera_fbx, thumbnail
     from ..publish.publisher import (
@@ -302,7 +303,7 @@ def create(session: Any, context_store: Any) -> Any:
             palette = self._name_edit.palette()
             if clash:
                 palette.setColor(
-                    QtGui.QPalette.Text, QtGui.QColor(220, 120, 60)
+                    QtGui.QPalette.Text, QtGui.QColor(theme.WARNING)
                 )
                 self._name_hint.setText(
                     'An asset called "{0}" already exists here; publishing '
@@ -343,9 +344,7 @@ def create(session: Any, context_store: Any) -> Any:
 
         def _say(self, message: str, error: bool = False) -> None:
             self._message.setText(message)
-            self._message.setStyleSheet(
-                'color: #d06030;' if error else ''
-            )
+            self._message.setStyleSheet(theme.message_style(error))
             if message:
                 (logger.error if error else logger.info)('%s', message)
 

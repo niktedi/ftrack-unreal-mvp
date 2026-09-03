@@ -76,6 +76,12 @@ def ensure_app() -> Any:
         _app = QtWidgets.QApplication(sys.argv[:1] or ['unreal'])
         logger.info('Created QApplication (Qt %s)', _qt_version())
 
+        # Qt on Windows defaults to a light native style, which beside the
+        # editor looks like a different application.
+        from . import theme
+
+        theme.apply(_app)
+
     # Closing our last window must not take Qt down with it.
     _app.setQuitOnLastWindowClosed(False)
 

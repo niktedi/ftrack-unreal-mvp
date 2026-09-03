@@ -36,6 +36,7 @@ def create(session: Any, context_store: Any) -> Any:
     '''Build the Change Context window.'''
     from PySide6 import QtCore, QtGui, QtWidgets
 
+    from . import theme
     from .. import async_utils
     from ..context import query_user_tasks
     from ..session import create_worker_session
@@ -290,7 +291,7 @@ def create(session: Any, context_store: Any) -> Any:
 
         def _say(self, message: str, error: bool = False) -> None:
             self._message.setText(message)
-            self._message.setStyleSheet('color: #d06030;' if error else '')
+            self._message.setStyleSheet(theme.message_style(error))
             if message and error:
                 logger.error('%s', message)
 

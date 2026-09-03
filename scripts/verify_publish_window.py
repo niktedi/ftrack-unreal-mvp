@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import unreal  # pyright: ignore[reportMissingImports]
 
-from ftrack_unreal.ui import publish_window, qt_app
+from ftrack_unreal.ui import publish_window, qt_app, theme
 
 PROBE_PACKAGE = '/Game/FtrackPublishWindowCheck'
 PROBE_SEQUENCE = PROBE_PACKAGE + '/Seq_FtrackPublishWindowCheck'
@@ -129,7 +129,36 @@ def main():
     context = StubContext()
     try:
         camera = build()
-        qt_app.ensure_app()
+        app = qt_app.ensure_app()
+
+        # -- the dark theme -------------------------------------------------
+        from PySide6 import QtGui
+
+        check(
+            'the Fusion style was applied',
+            theme.applied_style() == theme.STYLE,
+            theme.applied_style() or 'none -- the windows will look native',
+        )
+        palette = app.palette()
+        check(
+            'the palette is dark',
+            palette.color(QtGui.QPalette.Window).name() == theme.BACKGROUND
+            and palette.color(QtGui.QPalette.Base).name() == theme.BASE
+            and palette.color(QtGui.QPalette.Text).name() == theme.TEXT,
+            'window={0} base={1} text={2}'.format(
+                palette.color(QtGui.QPalette.Window).name(),
+                palette.color(QtGui.QPalette.Base).name(),
+                palette.color(QtGui.QPalette.Text).name(),
+            ),
+        )
+        check(
+            'disabled text is dimmed rather than left readable',
+            palette.color(
+                QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText
+            ).name()
+            == theme.DISABLED_TEXT,
+        )
+
         window = qt_app.show(
             'publish',
             publish_window.make_factory(None, context),
@@ -206,6 +235,20 @@ def main():
         window._set_busy(True)
         check('publishing disables the form', not window._publish_button.isEnabled())
         window._set_busy(False)
+
+        check(
+            'the window inherits the dark palette',
+            window.palette().color(QtGui.QPalette.Window).name()
+            == theme.BACKGROUND,
+            window.palette().color(QtGui.QPalette.Window).name(),
+        )
+        window._say('something failed', error=True)
+        check(
+            'the status line uses the theme colours',
+            theme.ERROR in window._message.styleSheet(),
+            window._message.styleSheet(),
+        )
+        window._say('')
 
         # -- reopening must re-read, not show what it read the first time ---
 

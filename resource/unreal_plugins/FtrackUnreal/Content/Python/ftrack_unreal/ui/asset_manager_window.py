@@ -37,6 +37,7 @@ def create(session: Any, context_store: Any) -> Any:
     '''Build the Asset Manager window.'''
     from PySide6 import QtCore, QtGui, QtWidgets
 
+    from . import theme
     from .. import async_utils, unreal_env
     from ..asset_manager.details import DetailsReader
     from ..asset_manager.tree_model import ASSET, VERSION, TreeModel, matches
@@ -342,7 +343,9 @@ def create(session: Any, context_store: Any) -> Any:
                     ]
                 )
                 if not component.available:
-                    row.setForeground(3, QtGui.QBrush(QtGui.QColor(200, 120, 60)))
+                    row.setForeground(
+                        3, QtGui.QBrush(QtGui.QColor(theme.WARNING))
+                    )
                     row.setToolTip(
                         3,
                         'The file is registered in ftrack but is not on this '
@@ -429,7 +432,7 @@ def create(session: Any, context_store: Any) -> Any:
 
         def _say(self, message: str, error: bool = False) -> None:
             self._message.setText(message)
-            self._message.setStyleSheet('color: #d06030;' if error else '')
+            self._message.setStyleSheet(theme.message_style(error))
             if message and error:
                 logger.error('%s', message)
 
