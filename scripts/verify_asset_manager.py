@@ -160,13 +160,7 @@ def check_component_display():
     # -- the same fact, said once in the summary ------------------------
 
     def summary_location():
-        form = window._info
-        for index in range(form.rowCount()):
-            label = form.itemAt(index, QtWidgets.QFormLayout.LabelRole)
-            field = form.itemAt(index, QtWidgets.QFormLayout.FieldRole)
-            if label and label.widget() and label.widget().text() == 'Location':
-                return field.widget().text()
-        return None
+        return window.info_value('Location')
 
     check(
         'the summary names the locations per component when they differ',
@@ -217,13 +211,58 @@ def check_component_display():
         '{0} / {1}'.format(table.topLevelItem(0).text(3), summary_location()),
     )
 
-    window._components.resize(300, 190)
+    window._components.resize(300, 260)
     QtWidgets.QApplication.processEvents()
     check(
         'the Path column survives a narrow panel',
         window._components.columnWidth(3) > 40,
         'widths={0}'.format(
             [window._components.columnWidth(i) for i in range(4)]
+        ),
+    )
+
+    # -- the layout -----------------------------------------------------
+
+    window._show_details(
+        VersionDetails(
+            version_id='v4', asset_name='camA', asset_type='Camera',
+            parent_name='sh010', version=6, status='WIP', author='Jane Doe',
+            date='2026-09-04', comment='a note', is_latest=True,
+            task_name='anim',
+            components=[ComponentInfo('fbx', 'fbx', 10, [local])],
+            metadata={'fps': '24', 'frame_range': '0-48'},
+            thumbnail_id=None,
+        ),
+        None,
+    )
+    QtWidgets.QApplication.processEvents()
+
+    counts = [form.rowCount() for form in window._info_forms]
+    check(
+        'the facts are split across two columns',
+        len(counts) == 2 and all(counts) and abs(counts[0] - counts[1]) <= 1,
+        'rows per column: {0}'.format(counts),
+    )
+    check(
+        'a value can still be found whichever column it landed in',
+        window.info_value('Asset') is not None
+        and window.info_value('fps') == '24',
+        'Asset={0}, fps={1}'.format(
+            window.info_value('Asset'), window.info_value('fps')
+        ),
+    )
+    check(
+        'the preview is a third shorter than it was',
+        window._preview.height() == 135,
+        '{0}px, was 200'.format(window._preview.height()),
+    )
+    check(
+        'the file table has room and grows with the panel',
+        window._components.minimumHeight() >= 260
+        and window._components.maximumHeight() > 1000,
+        'min={0}, max={1}'.format(
+            window._components.minimumHeight(),
+            window._components.maximumHeight(),
         ),
     )
 

@@ -46,6 +46,10 @@ def create(session: Any, context_store: Any) -> Any:
     NODE_ROLE = QtCore.Qt.UserRole + 1
     LOADING_ROLE = QtCore.Qt.UserRole + 2
 
+    #: Was 200; the preview is orientation, not the point of the panel.
+    PREVIEW_HEIGHT = 135
+    COMPONENTS_MIN_HEIGHT = 260
+
     def _location_summary(components: list) -> str:
         '''Return where this version's files are, in one line.
 
@@ -143,8 +147,10 @@ def create(session: Any, context_store: Any) -> Any:
             panel_layout.setContentsMargins(12, 0, 0, 0)
             panel_layout.setSpacing(8)
 
+            # A third shorter than it was: the preview is orientation, the
+            # facts and the files below it are the work.
             self._preview = QtWidgets.QLabel('')
-            self._preview.setMinimumHeight(200)
+            self._preview.setFixedHeight(PREVIEW_HEIGHT)
             self._preview.setAlignment(QtCore.Qt.AlignCenter)
             self._preview.setFrameShape(QtWidgets.QFrame.StyledPanel)
             panel_layout.addWidget(self._preview)
@@ -156,16 +162,27 @@ def create(session: Any, context_store: Any) -> Any:
             self._heading.setFont(font)
             panel_layout.addWidget(self._heading)
 
-            self._info = QtWidgets.QFormLayout()
-            self._info.setLabelAlignment(QtCore.Qt.AlignRight)
-            panel_layout.addLayout(self._info)
+            # Two columns: the facts are short and there are a dozen of them,
+            # so one long column would push the file table off the bottom.
+            columns = QtWidgets.QHBoxLayout()
+            columns.setSpacing(18)
+            self._info_forms = []
+            for _ in range(2):
+                form = QtWidgets.QFormLayout()
+                form.setLabelAlignment(QtCore.Qt.AlignRight)
+                form.setFormAlignment(QtCore.Qt.AlignTop)
+                form.setHorizontalSpacing(8)
+                form.setVerticalSpacing(4)
+                self._info_forms.append(form)
+                columns.addLayout(form, 1)
+            panel_layout.addLayout(columns)
 
             self._components = QtWidgets.QTreeWidget()
             self._components.setHeaderLabels(
                 ['Component / Location', 'Type', 'Size', 'Path']
             )
             self._components.setRootIsDecorated(True)
-            self._components.setMaximumHeight(190)
+            self._components.setMinimumHeight(COMPONENTS_MIN_HEIGHT)
 
             # The first three take only what they need so Location keeps the
             # rest; with default 100px columns it is the one that gets cut off
@@ -176,9 +193,9 @@ def create(session: Any, context_store: Any) -> Any:
                     column, QtWidgets.QHeaderView.ResizeToContents
                 )
             header.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
-            panel_layout.addWidget(self._components)
 
-            panel_layout.addStretch(1)
+            # Takes the slack instead of a spacer, so it grows with the window.
+            panel_layout.addWidget(self._components, 1)
 
             buttons = QtWidgets.QHBoxLayout()
             buttons.addStretch(1)
@@ -363,11 +380,13 @@ def create(session: Any, context_store: Any) -> Any:
             for key, value in sorted(info.metadata.items()):
                 rows.append((key, value))
 
-            for label, value in rows:
+            half = (len(rows) + 1) // 2
+            for index, (label, value) in enumerate(rows):
                 field = QtWidgets.QLabel(str(value))
                 field.setWordWrap(True)
                 field.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-                self._info.addRow(label, field)
+                form = self._info_forms[0 if index < half else 1]
+                form.addRow(label, field)
 
             self._components.clear()
             for component in info.components:
@@ -467,8 +486,23 @@ def create(session: Any, context_store: Any) -> Any:
                 self._heading.setText(node.label)
 
         def _clear_form(self) -> None:
-            while self._info.rowCount():
-                self._info.removeRow(0)
+            for form in self._info_forms:
+                while form.rowCount():
+                    form.removeRow(0)
+
+        def info_value(self, label: str) -> Optional[str]:
+            '''Return the value shown against *label*, or ``None``.
+
+            Public because the details are split across two columns now, and
+            the editor checks would otherwise have to know which.
+            '''
+            for form in self._info_forms:
+                for index in range(form.rowCount()):
+                    name = form.itemAt(index, QtWidgets.QFormLayout.LabelRole)
+                    value = form.itemAt(index, QtWidgets.QFormLayout.FieldRole)
+                    if name and name.widget() and name.widget().text() == label:
+                        return value.widget().text()
+            return None
 
         # -- filtering ------------------------------------------------------
 
