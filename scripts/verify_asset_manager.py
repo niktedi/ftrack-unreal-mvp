@@ -195,6 +195,28 @@ def check_component_display():
         summary_location(),
     )
 
+    # A failed query must not be dressed up as "the file is nowhere" -- that
+    # blames the data for what is our problem, and is how a broken projection
+    # went unnoticed.
+    window._show_details(
+        VersionDetails(
+            version_id='v3', asset_name='camA', asset_type='Camera',
+            parent_name='sh010', version=5, status='WIP', author='',
+            date='', comment='', is_latest=True, task_name='',
+            components=[
+                ComponentInfo('fbx', 'fbx', 10, [], locations_unknown=True)
+            ],
+            metadata={}, thumbnail_id=None,
+        ),
+        None,
+    )
+    check(
+        'a failed location query says so, rather than "nowhere"',
+        table.topLevelItem(0).text(3) == 'locations could not be read'
+        and summary_location() == 'unknown',
+        '{0} / {1}'.format(table.topLevelItem(0).text(3), summary_location()),
+    )
+
     window._components.resize(300, 190)
     QtWidgets.QApplication.processEvents()
     check(

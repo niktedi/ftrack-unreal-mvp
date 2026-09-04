@@ -56,7 +56,10 @@ def create(session: Any, context_store: Any) -> Any:
             return 'no components'
 
         places = [
-            component.location_names or 'nowhere' for component in components
+            'unknown'
+            if component.locations_unknown
+            else (component.location_names or 'nowhere')
+            for component in components
         ]
         if len(set(places)) == 1:
             return places[0]
@@ -377,6 +380,18 @@ def create(session: Any, context_store: Any) -> Any:
                     ]
                 )
                 self._components.addTopLevelItem(row)
+
+                if component.locations_unknown:
+                    # The query failed. Saying "no locations" here would blame
+                    # the data for what is our problem.
+                    row.setText(3, 'locations could not be read')
+                    warn(
+                        row,
+                        'The query for the locations of this file failed. The '
+                        'Output Log has the error and the query that caused '
+                        'it.',
+                    )
+                    continue
 
                 if not component.locations:
                     # Published but never transferred, or the transfer failed.

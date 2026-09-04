@@ -44,9 +44,12 @@ class FakeAccessor:
 
 
 class FakeLocation(dict):
-    def __init__(self, location_id, name, accessor=NOT_SET):
+    def __init__(self, location_id, name, accessor=NOT_SET, priority=95):
         super().__init__(id=location_id, name=name)
+        # Both live on the Python object, not in the schema: ftrack_api sets
+        # them in Location.__init__ and the location plugin assigns them.
         self.accessor = accessor
+        self.priority = priority
 
 
 class FakeQuery:
@@ -95,12 +98,23 @@ def component(component_id='c1', name='fbx', file_type='.fbx', size=27408):
     }
 
 
-def component_location(component_id, location_id, name, priority=0,
+def component_location(component_id, location_id, name,
                        resource_identifier='camA/camA_v001.fbx'):
+    # No 'priority' key: it is not a field of the schema and cannot be
+    # projected, which is what this whole module exists to remember.
     return {
         'component_id': component_id,
         'resource_identifier': resource_identifier,
-        'location': {'id': location_id, 'name': name, 'priority': priority},
+        'location': {'id': location_id, 'name': name},
+    }
+
+
+def studio_locations():
+    '''The two locations this studio has, with their real priorities.'''
+    return {
+        'loc-local': FakeLocation('loc-local', 'studio.local',
+                                  FakeAccessor(), priority=0),
+        'loc-s3': FakeLocation('loc-s3', 's3.studio.storage', priority=10),
     }
 
 
@@ -117,14 +131,10 @@ class TestComponentLocations(Fixture):
         session = FakeSession(
             components=[component()],
             component_locations=[
-                component_location('c1', 'loc-local', 'studio.local', 0),
-                component_location('c1', 'loc-s3', 's3.studio.storage', 10),
+                component_location('c1', 'loc-local', 'studio.local'),
+                component_location('c1', 'loc-s3', 's3.studio.storage'),
             ],
-            locations={
-                'loc-local': FakeLocation('loc-local', 'studio.local',
-                                          FakeAccessor()),
-                'loc-s3': FakeLocation('loc-s3', 's3.studio.storage'),
-            },
+            locations=studio_locations(),
         )
 
         info = self.reader(session).read_components('v1')[0]
@@ -140,13 +150,15 @@ class TestComponentLocations(Fixture):
         session = FakeSession(
             components=[component()],
             component_locations=[
-                component_location('c1', 'loc-s3', 's3.studio.storage', 10),
-                component_location('c1', 'loc-local', 'studio.local', 0),
+                component_location('c1', 'loc-s3', 's3.studio.storage'),
+                component_location('c1', 'loc-local', 'studio.local'),
             ],
+            locations=studio_locations(),
         )
 
         info = self.reader(session).read_components('v1')[0]
 
+        # Priority comes off the Location entity, not the query.
         self.assertEqual(info.locations[0].name, 'studio.local')
 
     def test_a_location_without_an_accessor_is_still_reported(self):
@@ -155,7 +167,7 @@ class TestComponentLocations(Fixture):
         session = FakeSession(
             components=[component()],
             component_locations=[
-                component_location('c1', 'loc-s3', 's3.studio.storage', 10)
+                component_location('c1', 'loc-s3', 's3.studio.storage')
             ],
             locations={'loc-s3': FakeLocation('loc-s3', 's3.studio.storage')},
         )
@@ -290,6 +302,43 @@ class TestComponentLocations(Fixture):
 
         location_gets = [g for g in session.gets if g[0] == 'Location']
         self.assertEqual(len(location_gets), 1)
+
+    def test_the_projection_does_not_ask_for_priority(self):
+        # Priority is not a field of the schema -- ftrack_api sets it in
+        # Location.__init__ and the multi-site-location plugin assigns it.
+        # Projecting it is a parse error that fails the whole query, and the
+        # panel then reported every component as being in no location.
+        from ftrack_unreal.asset_manager.details import (
+            COMPONENT_LOCATIONS_PROJECTION,
+        )
+
+        self.assertNotIn('priority', COMPONENT_LOCATIONS_PROJECTION)
+
+    def test_a_failed_query_is_reported_as_unknown_not_as_empty(self):
+        class Failing(FakeSession):
+            def query(self, expression):
+                if 'from ComponentLocation' in expression:
+                    raise RuntimeError(
+                        "ParseError(No attribute 'priority' exists...)"
+                    )
+                return FakeSession.query(self, expression)
+
+        session = Failing(components=[component()], component_locations=[])
+
+        info = self.reader(session).read_components('v1')[0]
+
+        self.assertTrue(info.locations_unknown)
+        self.assertFalse(info.available)
+
+    def test_no_locations_is_not_reported_as_unknown(self):
+        session = FakeSession(
+            components=[component()], component_locations=[]
+        )
+
+        info = self.reader(session).read_components('v1')[0]
+
+        self.assertFalse(info.locations_unknown)
+        self.assertFalse(info.available)
 
     def test_a_failing_location_query_does_not_lose_the_components(self):
         class Failing(FakeSession):

@@ -53,9 +53,14 @@ COMPONENTS_PROJECTION = (
 #: being nowhere at all. ComponentLocation is the server's own record and does
 #: not care what is set up locally. It is also one query for the whole version
 #: rather than one per location per component.
+#:
+#: `location.priority` is deliberately absent. Priority is not a field of the
+#: schema -- ftrack_api sets it in `Location.__init__` alongside `accessor` and
+#: `structure`, and the multi-site-location plugin assigns it client side.
+#: Projecting it is a server-side parse error that fails the whole query, which
+#: read as every component being in no location at all.
 COMPONENT_LOCATIONS_PROJECTION = (
-    'select component_id, resource_identifier, '
-    'location.id, location.name, location.priority '
+    'select component_id, resource_identifier, location.id, location.name '
     'from ComponentLocation where component_id in ({0})'
 )
 
@@ -95,6 +100,9 @@ class ComponentInfo:
     file_type: str
     size: Optional[int]
     locations: List[LocationInfo] = field(default_factory=list)
+    #: True when the locations could not be read at all, which is a different
+    #: thing from there being none and must not be reported as one.
+    locations_unknown: bool = False
 
     @property
     def available(self) -> bool:
@@ -229,7 +237,7 @@ class DetailsReader:
             )
             return []
 
-        by_component = self._read_locations(
+        by_component, unknown = self._read_locations(
             [component['id'] for component in components]
         )
 
@@ -239,18 +247,21 @@ class DetailsReader:
                 file_type=(component['file_type'] or '').lstrip('.'),
                 size=component['size'],
                 locations=by_component.get(component['id'], []),
+                locations_unknown=unknown,
             )
             for component in components
         ]
         infos.sort(key=lambda item: item.name.lower())
         return infos
 
-    def _read_locations(
-        self, component_ids: List[str]
-    ) -> Dict[str, List[LocationInfo]]:
-        '''Return ``{component_id: [LocationInfo, ...]}``, in one query.'''
+    def _read_locations(self, component_ids: List[str]):
+        '''Return ``({component_id: [LocationInfo, ...]}, unknown)``.
+
+        *unknown* is True when the query failed, so the caller can say the
+        locations could not be read rather than claiming there are none.
+        '''
         if not component_ids:
-            return {}
+            return {}, False
 
         quoted = ', '.join('"{0}"'.format(value) for value in component_ids)
         try:
@@ -258,11 +269,15 @@ class DetailsReader:
                 COMPONENT_LOCATIONS_PROJECTION.format(quoted)
             ).all()
         except Exception as error:
-            logger.error('Could not read component locations: %s', error)
-            return {}
+            logger.error(
+                'Could not read component locations: %s. Query was: %s',
+                error,
+                COMPONENT_LOCATIONS_PROJECTION.format(quoted),
+            )
+            return {}, True
 
         by_component: Dict[str, List[LocationInfo]] = {}
-        priorities: Dict[str, Any] = {}
+        priorities: Dict[str, float] = {}
 
         for row in rows:
             location = row['location'] or {}
@@ -270,26 +285,37 @@ class DetailsReader:
             if not name or name in BUILTIN_LOCATION_NAMES:
                 continue
 
-            priorities[name] = location.get('priority')
             info = LocationInfo(
                 name=name,
                 location_id=location.get('id') or '',
                 resource_identifier=row['resource_identifier'] or '',
             )
             self._resolve_path(info)
+            priorities[name] = self._priority(info.location_id)
             by_component.setdefault(row['component_id'], []).append(info)
 
         # Best first, so the head of the list is the one to prefer.
         for locations in by_component.values():
             locations.sort(
                 key=lambda item: (
-                    priorities.get(item.name)
-                    if priorities.get(item.name) is not None
-                    else 999,
+                    priorities.get(item.name, 95.0),
                     item.name.lower(),
                 )
             )
-        return by_component
+        return by_component, False
+
+    def _priority(self, location_id: str) -> float:
+        '''Return the client-side priority of a location; lower is better.
+
+        Priority lives on the Python object, not in the schema -- it is what
+        the multi-site-location plugin sets when it configures a location -- so
+        it has to be read from the entity rather than projected.
+        '''
+        location = self._get_location(location_id)
+        try:
+            return float(getattr(location, 'priority', 95))
+        except (TypeError, ValueError):
+            return 95.0
 
     def _resolve_path(self, info: LocationInfo) -> None:
         '''Fill in the filesystem path, when this machine can name one.'''
