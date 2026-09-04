@@ -31,6 +31,8 @@ from ftrack_unreal.asset_manager.tree_model import (
     VERSION,
     TreeModel,
 )
+from PySide6 import QtCore  # noqa: E402  (Qt lives in dependencies/)
+
 from ftrack_unreal.ui import asset_manager_window, qt_app, theme
 
 RESULTS = []
@@ -67,14 +69,18 @@ class StubContext:
 
 
 def check_component_display():
-    '''Check how components report their location. Needs no server.
+    """Check how components report their locations. Needs no server.
 
-    Four situations that must not be conflated -- confusing them is what makes
-    a failed import baffling half an hour later.
-    '''
-    from PySide6 import QtCore, QtWidgets
+    A component is commonly in several locations at once, and which ones is
+    exactly the question the panel exists to answer.
+    """
+    from PySide6 import QtWidgets
 
-    from ftrack_unreal.asset_manager.details import ComponentInfo, VersionDetails
+    from ftrack_unreal.asset_manager.details import (
+        ComponentInfo,
+        LocationInfo,
+        VersionDetails,
+    )
 
     qt_app.ensure_app()
     window = qt_app.show(
@@ -83,23 +89,22 @@ def check_component_display():
         'ftrack - Asset Manager',
     )
 
+    local = LocationInfo('studio.local', 'loc-1', 'camA/camA.fbx',
+                         path='D:/proj/camA/camA.fbx', readable=True)
+    s3_readable = LocationInfo('s3.studio.storage', 'loc-2', 'camA/camA.abc',
+                               path=None, readable=True)
+    s3_unset = LocationInfo('s3.studio.storage', 'loc-2', 'camA/camA.usd',
+                            path=None, readable=False)
+
     window._show_details(
         VersionDetails(
             version_id='v1', asset_name='camA', asset_type='Camera',
             parent_name='sh010', version=3, status='WIP', author='Jane Doe',
             date='2026-09-04', comment='', is_latest=True, task_name='anim',
             components=[
-                ComponentInfo('fbx', 'fbx', 27408,
-                              location_name='studio.local',
-                              path='D:/proj/camA.fbx',
-                              available=True, readable=True),
-                ComponentInfo('abc', 'abc', 900000,
-                              location_name='s3.studio.storage',
-                              available=True, readable=True),
-                ComponentInfo('usd', 'usd', 100,
-                              location_name='s3.studio.storage',
-                              available=True, readable=False),
-                ComponentInfo('exr', 'exr', 50, available=False),
+                ComponentInfo('fbx', 'fbx', 27408, [local, s3_readable]),
+                ComponentInfo('usd', 'usd', 100, [s3_unset]),
+                ComponentInfo('exr', 'exr', 50, []),
             ],
             metadata={}, thumbnail_id=None,
         ),
@@ -107,43 +112,49 @@ def check_component_display():
     )
 
     table = window._components
-    rows = [
-        (
-            table.topLevelItem(index).text(0),
-            table.topLevelItem(index).text(3),
-            table.topLevelItem(index).toolTip(3),
-        )
-        for index in range(table.topLevelItemCount())
-    ]
-    for name, location, tip in rows:
-        unreal.log('  {0:<4} | {1:<20} | {2}'.format(name, location, tip))
+    top = [table.topLevelItem(i) for i in range(table.topLevelItemCount())]
+    for item in top:
+        unreal.log('  {0}'.format(item.text(0)))
+        for index in range(item.childCount()):
+            child = item.child(index)
+            unreal.log(
+                '      {0:<20} {1}'.format(child.text(0), child.text(3))
+            )
+        if not item.childCount():
+            unreal.log('      {0}'.format(item.text(3)))
 
     check(
-        'a readable component names its location and its path',
-        rows[0][1] == 'studio.local' and rows[0][2] == 'D:/proj/camA.fbx',
+        'a component in two locations lists both',
+        top[0].childCount() == 2
+        and top[0].child(0).text(0) == 'studio.local'
+        and top[0].child(1).text(0) == 's3.studio.storage',
+        [top[0].child(i).text(0) for i in range(top[0].childCount())],
     )
     check(
-        'a location that exposes no path is still named',
-        rows[1][1] == 's3.studio.storage'
-        and 'does not expose file paths' in rows[1][2],
+        'a resolved path is shown against its location',
+        top[0].child(0).text(3) == 'D:/proj/camA/camA.fbx',
+        top[0].child(0).text(3),
     )
     check(
-        'a location this machine cannot reach is still named',
-        rows[2][1] == 's3.studio.storage'
-        and 'not configured on this machine' in rows[2][2],
+        'a location that cannot name a path says so',
+        top[0].child(1).text(3) == 'no filesystem path',
+        top[0].child(1).text(3),
+    )
+    check(
+        'a location not configured here says so',
+        top[1].child(0).text(3) == 'not set up on this machine',
+        top[1].child(0).text(3),
     )
     check(
         'a component in no location says so',
-        rows[3][1] == 'nowhere' and 'no storage location' in rows[3][2],
+        top[2].childCount() == 0
+        and top[2].text(3) == 'in no storage location',
+        top[2].text(3),
     )
     check(
         'only the rows worth attention are coloured',
-        table.topLevelItem(2).foreground(3).color().name() == theme.WARNING
-        and table.topLevelItem(0).foreground(3).style() == QtCore.Qt.NoBrush,
-        'unreachable={0}, readable brush={1}'.format(
-            table.topLevelItem(2).foreground(3).color().name(),
-            table.topLevelItem(0).foreground(3).style(),
-        ),
+        top[1].child(0).foreground(3).color().name() == theme.WARNING
+        and top[0].child(0).foreground(3).style() == QtCore.Qt.NoBrush,
     )
 
     # -- the same fact, said once in the summary ------------------------
@@ -158,20 +169,23 @@ def check_component_display():
         return None
 
     check(
-        'the details summary names the location too',
-        summary_location() == 'fbx: studio.local, abc: s3.studio.storage, '
-        'usd: s3.studio.storage (not set up here), exr: nowhere',
+        'the summary names the locations per component when they differ',
+        summary_location()
+        == 'fbx: studio.local, s3.studio.storage, usd: s3.studio.storage, '
+        'exr: nowhere',
         summary_location(),
     )
 
-    same = ComponentInfo('fbx', 'fbx', 10, location_name='studio.local',
-                         path='D:/a.fbx', available=True, readable=True)
     window._show_details(
         VersionDetails(
             version_id='v2', asset_name='camA', asset_type='Camera',
             parent_name='sh010', version=4, status='WIP', author='',
             date='', comment='', is_latest=True, task_name='',
-            components=[same, same], metadata={}, thumbnail_id=None,
+            components=[
+                ComponentInfo('fbx', 'fbx', 10, [local]),
+                ComponentInfo('abc', 'abc', 10, [local]),
+            ],
+            metadata={}, thumbnail_id=None,
         ),
         None,
     )
@@ -181,11 +195,10 @@ def check_component_display():
         summary_location(),
     )
 
-    # The column is the one that gets squeezed out when the panel is narrow.
-    window._components.resize(300, 140)
+    window._components.resize(300, 190)
     QtWidgets.QApplication.processEvents()
     check(
-        'the Location column survives a narrow panel',
+        'the Path column survives a narrow panel',
         window._components.columnWidth(3) > 40,
         'widths={0}'.format(
             [window._components.columnWidth(i) for i in range(4)]

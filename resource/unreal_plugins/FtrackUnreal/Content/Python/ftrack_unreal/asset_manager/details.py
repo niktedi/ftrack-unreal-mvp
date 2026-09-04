@@ -2,8 +2,8 @@
 
 '''What the Asset Manager shows on the right when something is selected.
 
-Two jobs: gather the facts about a version -- components, sizes, where the files
-actually are, metadata -- and get its preview image onto local disk.
+Two jobs: gather the facts about a version -- components, sizes, everywhere the
+files are -- and get its preview image onto local disk.
 
 Previews are cached under the project's `Saved` folder and are never fetched
 twice. The cache directory is passed in rather than looked up, so this module
@@ -45,6 +45,20 @@ COMPONENTS_PROJECTION = (
     'from Component where version_id is "{0}"'
 )
 
+#: Where the files actually are, asked of ftrack directly.
+#:
+#: Deliberately not ``Location.get_component_availability``: that answers
+#: through the Location objects configured on *this* machine, so a component
+#: sitting in a location this workstation has no accessor for came back as
+#: being nowhere at all. ComponentLocation is the server's own record and does
+#: not care what is set up locally. It is also one query for the whole version
+#: rather than one per location per component.
+COMPONENT_LOCATIONS_PROJECTION = (
+    'select component_id, resource_identifier, '
+    'location.id, location.name, location.priority '
+    'from ComponentLocation where component_id in ({0})'
+)
+
 VERSION_PROJECTION = (
     'select id, version, comment, date, is_latest_version, thumbnail_id, '
     'status.name, user.first_name, user.last_name, metadata, '
@@ -55,25 +69,55 @@ VERSION_PROJECTION = (
 
 
 @dataclass
-class ComponentInfo:
-    '''One file attached to a version.
+class LocationInfo:
+    '''One place a component's file is registered.'''
 
-    ``available`` and ``readable`` are different facts and both are worth
-    showing: ftrack can be certain a file sits in ``s3.studio.storage`` while
-    this machine has no accessor configured for it, in which case naming the
-    location is useful and pretending the file is at hand is not.
+    name: str
+    location_id: str
+    resource_identifier: str
+    #: Absolute path, when this machine has an accessor that can name one.
+    path: Optional[str] = None
+    #: This machine has an accessor for the location.
+    readable: bool = False
+
+
+@dataclass
+class ComponentInfo:
+    '''One file attached to a version, and everywhere it lives.
+
+    A component is commonly in more than one location at once -- on the local
+    disk *and* on S3 -- so all of them are listed. Picking a single "best" one
+    hides whether a transfer has happened, which is usually the question being
+    asked.
     '''
 
     name: str
     file_type: str
     size: Optional[int]
-    #: Where ftrack says the file is.
-    location_name: Optional[str] = None
-    path: Optional[str] = None
-    #: ftrack reports the file as fully present in that location.
-    available: bool = False
-    #: ...and this machine has an accessor for it.
-    readable: bool = False
+    locations: List[LocationInfo] = field(default_factory=list)
+
+    @property
+    def available(self) -> bool:
+        '''Whether ftrack has this file in any studio location.'''
+        return bool(self.locations)
+
+    @property
+    def readable(self) -> bool:
+        '''Whether this machine can reach at least one of them.'''
+        return any(location.readable for location in self.locations)
+
+    @property
+    def local_path(self) -> Optional[str]:
+        '''The first resolved filesystem path, if there is one.'''
+        for location in self.locations:
+            if location.path:
+                return location.path
+        return None
+
+    @property
+    def location_names(self) -> str:
+        '''The locations, comma separated, best first.'''
+        return ', '.join(location.name for location in self.locations)
 
     @property
     def size_label(self) -> str:
@@ -107,8 +151,11 @@ def format_size(size: Optional[int]) -> str:
     value = float(size)
     for unit in ('B', 'KB', 'MB', 'GB'):
         if value < 1024 or unit == 'GB':
-            return '{0:.0f} {1}'.format(value, unit) if unit == 'B' \
+            return (
+                '{0:.0f} {1}'.format(value, unit)
+                if unit == 'B'
                 else '{0:.1f} {1}'.format(value, unit)
+            )
         value /= 1024
     return '{0:.1f} GB'.format(value)
 
@@ -124,7 +171,7 @@ class DetailsReader:
         '''
         self._session = session
         self._cache_dir = cache_dir
-        self._storage_locations: Optional[List[Any]] = None
+        self._locations: Dict[str, Any] = {}
 
     # -- facts --------------------------------------------------------------
 
@@ -148,9 +195,9 @@ class DetailsReader:
 
         return VersionDetails(
             version_id=version['id'],
-            asset_name=(asset or {}).get('name') or '',
-            asset_type=((asset or {}).get('type') or {}).get('name') or '',
-            parent_name=((asset or {}).get('parent') or {}).get('name') or '',
+            asset_name=asset.get('name') or '',
+            asset_type=(asset.get('type') or {}).get('name') or '',
+            parent_name=(asset.get('parent') or {}).get('name') or '',
             version=version['version'],
             status=(version['status'] or {}).get('name') or '',
             author=' '.join(
@@ -171,7 +218,7 @@ class DetailsReader:
         )
 
     def read_components(self, version_id: str) -> List[ComponentInfo]:
-        '''Return the components of a version, with where each one lives.'''
+        '''Return the components of a version and everywhere each one lives.'''
         try:
             components = self._session.query(
                 COMPONENTS_PROJECTION.format(version_id)
@@ -182,86 +229,108 @@ class DetailsReader:
             )
             return []
 
-        infos = []
-        for component in components:
-            info = ComponentInfo(
+        by_component = self._read_locations(
+            [component['id'] for component in components]
+        )
+
+        infos = [
+            ComponentInfo(
                 name=component['name'] or '',
                 file_type=(component['file_type'] or '').lstrip('.'),
                 size=component['size'],
+                locations=by_component.get(component['id'], []),
             )
-            self._locate(component, info)
-            infos.append(info)
-
+            for component in components
+        ]
         infos.sort(key=lambda item: item.name.lower())
         return infos
 
-    def _locate(self, component: Any, info: ComponentInfo) -> None:
-        '''Fill in which storage location holds *component*, if any.
+    def _read_locations(
+        self, component_ids: List[str]
+    ) -> Dict[str, List[LocationInfo]]:
+        '''Return ``{component_id: [LocationInfo, ...]}``, in one query.'''
+        if not component_ids:
+            return {}
 
-        This is the usual reason an import fails later, so it is worth being
-        precise: name the location ftrack says the file is in, and separately
-        say whether this machine can actually reach it.
-        '''
-        for location in self._get_storage_locations():
-            try:
-                if location.get_component_availability(component) < 100.0:
-                    continue
-
-                info.location_name = location['name']
-                info.available = True
-
-                # `not accessor` rather than `is None`: an unconfigured
-                # location has accessor == ftrack_api.symbol.NOT_SET, which is
-                # falsy but not None. The library itself tests it this way.
-                if not location.accessor:
-                    logger.debug(
-                        '%s is in %s, which is not configured on this machine',
-                        info.name,
-                        location['name'],
-                    )
-                    return
-
-                info.readable = True
-                try:
-                    info.path = location.get_filesystem_path(component)
-                except Exception:
-                    # Not every accessor can name a path -- S3 cannot.
-                    info.path = None
-                return
-            except Exception as error:
-                logger.debug(
-                    'Could not check %s in %s: %s',
-                    info.name,
-                    location['name'],
-                    error,
-                )
-
-    def _get_storage_locations(self) -> List[Any]:
-        '''Return the studio storage locations, best first, queried once.
-
-        Locations without an accessor are kept: ftrack still knows the file is
-        there, and saying "it is on s3.studio.storage, which is not set up
-        here" is more useful than saying nothing.
-        '''
-        if self._storage_locations is not None:
-            return self._storage_locations
-
-        locations = []
+        quoted = ', '.join('"{0}"'.format(value) for value in component_ids)
         try:
-            for location in self._session.query(
-                'select id, name, priority from Location'
-            ).all():
-                if location['name'] in BUILTIN_LOCATION_NAMES:
-                    continue
-                locations.append(location)
+            rows = self._session.query(
+                COMPONENT_LOCATIONS_PROJECTION.format(quoted)
+            ).all()
         except Exception as error:
-            logger.warning(
-                'Could not list storage locations: %s (non-critical)', error
+            logger.error('Could not read component locations: %s', error)
+            return {}
+
+        by_component: Dict[str, List[LocationInfo]] = {}
+        priorities: Dict[str, Any] = {}
+
+        for row in rows:
+            location = row['location'] or {}
+            name = location.get('name') or ''
+            if not name or name in BUILTIN_LOCATION_NAMES:
+                continue
+
+            priorities[name] = location.get('priority')
+            info = LocationInfo(
+                name=name,
+                location_id=location.get('id') or '',
+                resource_identifier=row['resource_identifier'] or '',
+            )
+            self._resolve_path(info)
+            by_component.setdefault(row['component_id'], []).append(info)
+
+        # Best first, so the head of the list is the one to prefer.
+        for locations in by_component.values():
+            locations.sort(
+                key=lambda item: (
+                    priorities.get(item.name)
+                    if priorities.get(item.name) is not None
+                    else 999,
+                    item.name.lower(),
+                )
+            )
+        return by_component
+
+    def _resolve_path(self, info: LocationInfo) -> None:
+        '''Fill in the filesystem path, when this machine can name one.'''
+        location = self._get_location(info.location_id)
+        if location is None:
+            return
+
+        # `not accessor` rather than `is None`: an unconfigured location has
+        # accessor == ftrack_api.symbol.NOT_SET, which is falsy but not None.
+        # The library itself tests it this way.
+        accessor = getattr(location, 'accessor', None)
+        if not accessor:
+            return
+
+        info.readable = True
+        try:
+            info.path = accessor.get_filesystem_path(info.resource_identifier)
+        except Exception as error:
+            # S3 and the like cannot name a path; that is not a failure.
+            logger.debug(
+                'No filesystem path for %s in %s: %s',
+                info.resource_identifier,
+                info.name,
+                error,
             )
 
-        locations.sort(key=lambda item: item['priority'])
-        self._storage_locations = locations
-        return locations
+    def _get_location(self, location_id: str) -> Optional[Any]:
+        '''Return the Location entity for *location_id*, fetched once.'''
+        if not location_id:
+            return None
+        if location_id in self._locations:
+            return self._locations[location_id]
+
+        try:
+            location = self._session.get('Location', location_id)
+        except Exception as error:
+            logger.debug('Could not load location %s: %s', location_id, error)
+            location = None
+
+        self._locations[location_id] = location
+        return location
 
     def _read_metadata(self, version: Any) -> Dict[str, str]:
         try:

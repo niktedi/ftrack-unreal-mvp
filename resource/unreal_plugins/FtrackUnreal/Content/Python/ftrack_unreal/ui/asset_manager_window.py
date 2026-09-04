@@ -55,17 +55,9 @@ def create(session: Any, context_store: Any) -> Any:
         if not components:
             return 'no components'
 
-        places = []
-        for component in components:
-            if not component.available:
-                places.append('nowhere')
-            elif component.readable:
-                places.append(component.location_name)
-            else:
-                places.append(
-                    '{0} (not set up here)'.format(component.location_name)
-                )
-
+        places = [
+            component.location_names or 'nowhere' for component in components
+        ]
         if len(set(places)) == 1:
             return places[0]
         return ', '.join(
@@ -167,10 +159,10 @@ def create(session: Any, context_store: Any) -> Any:
 
             self._components = QtWidgets.QTreeWidget()
             self._components.setHeaderLabels(
-                ['Component', 'Type', 'Size', 'Location']
+                ['Component / Location', 'Type', 'Size', 'Path']
             )
-            self._components.setRootIsDecorated(False)
-            self._components.setMaximumHeight(140)
+            self._components.setRootIsDecorated(True)
+            self._components.setMaximumHeight(190)
 
             # The first three take only what they need so Location keeps the
             # rest; with default 100px columns it is the one that gets cut off
@@ -381,34 +373,50 @@ def create(session: Any, context_store: Any) -> Any:
                         component.name,
                         component.file_type,
                         component.size_label,
-                        component.location_name or 'nowhere',
+                        '',
                     ]
                 )
+                self._components.addTopLevelItem(row)
 
-                # Three different situations, and conflating them is what makes
-                # a failed import baffling later.
-                if not component.available:
+                if not component.locations:
+                    # Published but never transferred, or the transfer failed.
+                    # Either way the file is not fetchable from anywhere.
+                    row.setText(3, 'in no storage location')
                     warn(
                         row,
                         'ftrack has no storage location holding this file. It '
                         'was published but never transferred, or the transfer '
                         'failed.',
                     )
-                elif not component.readable:
-                    warn(
-                        row,
-                        'The file is in "{0}", but that location is not '
-                        'configured on this machine, so it cannot be read from '
-                        'here.'.format(component.location_name),
+                    continue
+
+                # A component is commonly in more than one location at once --
+                # locally and on S3 -- and which ones is exactly the question
+                # being asked, so list them all rather than picking one.
+                for location in component.locations:
+                    child = QtWidgets.QTreeWidgetItem(
+                        [location.name, '', '', location.path or '']
                     )
-                else:
-                    row.setToolTip(
-                        3,
-                        component.path
-                        or 'In "{0}". That location does not expose file '
-                        'paths.'.format(component.location_name),
-                    )
-                self._components.addTopLevelItem(row)
+                    if location.path:
+                        child.setToolTip(3, location.path)
+                    elif location.readable:
+                        child.setText(3, 'no filesystem path')
+                        child.setToolTip(
+                            3,
+                            'The location holds the file but cannot name a '
+                            'path for it. S3 is like that.',
+                        )
+                    else:
+                        child.setText(3, 'not set up on this machine')
+                        warn(
+                            child,
+                            'The file is in "{0}", but that location is not '
+                            'configured here, so it cannot be read from this '
+                            'machine.'.format(location.name),
+                        )
+                    row.addChild(child)
+
+                row.setExpanded(True)
 
             self._set_preview(preview)
             self._say('')
