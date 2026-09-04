@@ -46,6 +46,11 @@ def create(session: Any, context_store: Any) -> Any:
     NODE_ROLE = QtCore.Qt.UserRole + 1
     LOADING_ROLE = QtCore.Qt.UserRole + 2
 
+    def warn(row: Any, explanation: str) -> None:
+        '''Colour a component's location cell and say what is wrong with it.'''
+        row.setForeground(3, QtGui.QBrush(QtGui.QColor(theme.WARNING)))
+        row.setToolTip(3, explanation)
+
     class AssetManagerWindow(QtWidgets.QWidget):
         '''Browse the project's published assets and their versions.'''
 
@@ -333,26 +338,38 @@ def create(session: Any, context_store: Any) -> Any:
 
             self._components.clear()
             for component in info.components:
-                where = component.location_name or 'not available here'
                 row = QtWidgets.QTreeWidgetItem(
                     [
                         component.name,
                         component.file_type,
                         component.size_label,
-                        where,
+                        component.location_name or 'nowhere',
                     ]
                 )
+
+                # Three different situations, and conflating them is what makes
+                # a failed import baffling later.
                 if not component.available:
-                    row.setForeground(
-                        3, QtGui.QBrush(QtGui.QColor(theme.WARNING))
+                    warn(
+                        row,
+                        'ftrack has no storage location holding this file. It '
+                        'was published but never transferred, or the transfer '
+                        'failed.',
                     )
+                elif not component.readable:
+                    warn(
+                        row,
+                        'The file is in "{0}", but that location is not '
+                        'configured on this machine, so it cannot be read from '
+                        'here.'.format(component.location_name),
+                    )
+                else:
                     row.setToolTip(
                         3,
-                        'The file is registered in ftrack but is not on this '
-                        'machine.',
+                        component.path
+                        or 'In "{0}". That location does not expose file '
+                        'paths.'.format(component.location_name),
                     )
-                elif component.path:
-                    row.setToolTip(3, component.path)
                 self._components.addTopLevelItem(row)
 
             self._set_preview(preview)

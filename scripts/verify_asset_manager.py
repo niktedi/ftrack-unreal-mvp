@@ -31,7 +31,7 @@ from ftrack_unreal.asset_manager.tree_model import (
     VERSION,
     TreeModel,
 )
-from ftrack_unreal.ui import asset_manager_window, qt_app
+from ftrack_unreal.ui import asset_manager_window, qt_app, theme
 
 RESULTS = []
 
@@ -45,10 +45,120 @@ def check(name, passed, detail=''):
     )
 
 
+class StubContext:
+    '''Enough of a context store for the offline half.'''
+
+    context_id = 'check-task'
+    entity = {'id': 'check-task', 'link': [{'id': 'check-project',
+                                            'name': 'Check'}]}
+
+    def __init__(self):
+        self.listeners = []
+
+    def label(self):
+        return 'Check / sh010 / anim'
+
+    def subscribe(self, callback):
+        self.listeners.append(callback)
+
+    def unsubscribe(self, callback):
+        if callback in self.listeners:
+            self.listeners.remove(callback)
+
+
+def check_component_display():
+    '''Check how components report their location. Needs no server.
+
+    Four situations that must not be conflated -- confusing them is what makes
+    a failed import baffling half an hour later.
+    '''
+    from PySide6 import QtCore
+
+    from ftrack_unreal.asset_manager.details import ComponentInfo, VersionDetails
+
+    qt_app.ensure_app()
+    window = qt_app.show(
+        'asset_manager',
+        asset_manager_window.make_factory(None, StubContext()),
+        'ftrack - Asset Manager',
+    )
+
+    window._show_details(
+        VersionDetails(
+            version_id='v1', asset_name='camA', asset_type='Camera',
+            parent_name='sh010', version=3, status='WIP', author='Jane Doe',
+            date='2026-09-04', comment='', is_latest=True, task_name='anim',
+            components=[
+                ComponentInfo('fbx', 'fbx', 27408,
+                              location_name='studio.local',
+                              path='D:/proj/camA.fbx',
+                              available=True, readable=True),
+                ComponentInfo('abc', 'abc', 900000,
+                              location_name='s3.studio.storage',
+                              available=True, readable=True),
+                ComponentInfo('usd', 'usd', 100,
+                              location_name='s3.studio.storage',
+                              available=True, readable=False),
+                ComponentInfo('exr', 'exr', 50, available=False),
+            ],
+            metadata={}, thumbnail_id=None,
+        ),
+        None,
+    )
+
+    table = window._components
+    rows = [
+        (
+            table.topLevelItem(index).text(0),
+            table.topLevelItem(index).text(3),
+            table.topLevelItem(index).toolTip(3),
+        )
+        for index in range(table.topLevelItemCount())
+    ]
+    for name, location, tip in rows:
+        unreal.log('  {0:<4} | {1:<20} | {2}'.format(name, location, tip))
+
+    check(
+        'a readable component names its location and its path',
+        rows[0][1] == 'studio.local' and rows[0][2] == 'D:/proj/camA.fbx',
+    )
+    check(
+        'a location that exposes no path is still named',
+        rows[1][1] == 's3.studio.storage'
+        and 'does not expose file paths' in rows[1][2],
+    )
+    check(
+        'a location this machine cannot reach is still named',
+        rows[2][1] == 's3.studio.storage'
+        and 'not configured on this machine' in rows[2][2],
+    )
+    check(
+        'a component in no location says so',
+        rows[3][1] == 'nowhere' and 'no storage location' in rows[3][2],
+    )
+    check(
+        'only the rows worth attention are coloured',
+        table.topLevelItem(2).foreground(3).color().name() == theme.WARNING
+        and table.topLevelItem(0).foreground(3).style() == QtCore.Qt.NoBrush,
+        'unreachable={0}, readable brush={1}'.format(
+            table.topLevelItem(2).foreground(3).color().name(),
+            table.topLevelItem(0).foreground(3).style(),
+        ),
+    )
+
+    qt_app.close('asset_manager')
+
+
 def main():
     unreal.log('=' * 70)
     unreal.log('ftrack: asset manager check')
     unreal.log('=' * 70)
+
+    # The display half needs no session, so it runs first and always.
+    try:
+        check_component_display()
+    except Exception as error:
+        check('component display', False, repr(error))
 
     session = bootstrap.get_session()
     store = bootstrap.get_context_store()

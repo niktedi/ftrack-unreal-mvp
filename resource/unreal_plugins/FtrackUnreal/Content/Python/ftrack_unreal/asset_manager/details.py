@@ -56,14 +56,24 @@ VERSION_PROJECTION = (
 
 @dataclass
 class ComponentInfo:
-    '''One file attached to a version.'''
+    '''One file attached to a version.
+
+    ``available`` and ``readable`` are different facts and both are worth
+    showing: ftrack can be certain a file sits in ``s3.studio.storage`` while
+    this machine has no accessor configured for it, in which case naming the
+    location is useful and pretending the file is at hand is not.
+    '''
 
     name: str
     file_type: str
     size: Optional[int]
+    #: Where ftrack says the file is.
     location_name: Optional[str] = None
     path: Optional[str] = None
+    #: ftrack reports the file as fully present in that location.
     available: bool = False
+    #: ...and this machine has an accessor for it.
+    readable: bool = False
 
     @property
     def size_label(self) -> str:
@@ -188,20 +198,34 @@ class DetailsReader:
     def _locate(self, component: Any, info: ComponentInfo) -> None:
         '''Fill in which storage location holds *component*, if any.
 
-        Availability is what matters to the user: a component listed in ftrack
-        whose file is not on this machine is the usual reason an import fails,
-        and saying so up front beats a broken path later.
+        This is the usual reason an import fails later, so it is worth being
+        precise: name the location ftrack says the file is in, and separately
+        say whether this machine can actually reach it.
         '''
         for location in self._get_storage_locations():
             try:
                 if location.get_component_availability(component) < 100.0:
                     continue
+
                 info.location_name = location['name']
                 info.available = True
+
+                # `not accessor` rather than `is None`: an unconfigured
+                # location has accessor == ftrack_api.symbol.NOT_SET, which is
+                # falsy but not None. The library itself tests it this way.
+                if not location.accessor:
+                    logger.debug(
+                        '%s is in %s, which is not configured on this machine',
+                        info.name,
+                        location['name'],
+                    )
+                    return
+
+                info.readable = True
                 try:
                     info.path = location.get_filesystem_path(component)
                 except Exception:
-                    # Not every accessor can produce a path -- S3 cannot.
+                    # Not every accessor can name a path -- S3 cannot.
                     info.path = None
                 return
             except Exception as error:
@@ -213,7 +237,12 @@ class DetailsReader:
                 )
 
     def _get_storage_locations(self) -> List[Any]:
-        '''Return the usable storage locations, best first, queried once.'''
+        '''Return the studio storage locations, best first, queried once.
+
+        Locations without an accessor are kept: ftrack still knows the file is
+        there, and saying "it is on s3.studio.storage, which is not set up
+        here" is more useful than saying nothing.
+        '''
         if self._storage_locations is not None:
             return self._storage_locations
 
@@ -223,8 +252,6 @@ class DetailsReader:
                 'select id, name, priority from Location'
             ).all():
                 if location['name'] in BUILTIN_LOCATION_NAMES:
-                    continue
-                if location.accessor is None:
                     continue
                 locations.append(location)
         except Exception as error:

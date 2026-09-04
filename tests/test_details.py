@@ -38,11 +38,22 @@ class FakeQuery:
         return list(self._results)
 
 
+class NotSet:
+    '''Stands in for ftrack_api.symbol.NOT_SET: falsy, but not None.'''
+
+    def __bool__(self):
+        return False
+
+
+NOT_SET = NotSet()
+
+
 class FakeLocation(dict):
     def __init__(self, name, priority, availability=100.0, path='D:/proj/f.fbx',
-                 accessor=object()):
+                 accessor=None):
         super().__init__(id='loc-' + name, name=name, priority=priority)
-        self.accessor = accessor
+        # An unconfigured location carries NOT_SET, never None.
+        self.accessor = NOT_SET if accessor is None else accessor
         self._availability = availability
         self._path = path
 
@@ -118,8 +129,8 @@ class DetailsFixture(unittest.TestCase):
         self.addCleanup(self._clean_cache)
 
         self.locations = [
-            FakeLocation('studio.local', 0),
-            FakeLocation('s3.studio.storage', 10),
+            FakeLocation('studio.local', 0, accessor=object()),
+            FakeLocation('s3.studio.storage', 10, accessor=object()),
         ]
         self.session = FakeSession(
             results={
@@ -170,6 +181,7 @@ class TestRead(DetailsFixture):
         self.assertEqual(component.name, 'fbx')
         self.assertEqual(component.file_type, 'fbx')
         self.assertTrue(component.available)
+        self.assertTrue(component.readable)
         self.assertEqual(component.location_name, 'studio.local')
         self.assertEqual(component.path, 'D:/proj/f.fbx')
 
@@ -180,27 +192,54 @@ class TestRead(DetailsFixture):
         component = self.reader.read_components('v1')[0]
 
         self.assertFalse(component.available)
+        self.assertFalse(component.readable)
         self.assertIsNone(component.location_name)
+
+    def test_a_location_this_machine_cannot_reach_is_still_named(self):
+        # The regression this guards: an unconfigured location has
+        # accessor == NOT_SET, which is falsy but not None, so a check against
+        # None let it through and the file looked reachable.
+        self.locations[0]._availability = 0.0
+        self.locations[1].accessor = NOT_SET
+
+        component = self.reader.read_components('v1')[0]
+
+        self.assertEqual(component.location_name, 's3.studio.storage')
+        self.assertTrue(component.available)
+        self.assertFalse(component.readable)
+        self.assertIsNone(component.path)
+
+    def test_a_location_without_an_accessor_is_not_skipped(self):
+        # Naming where the file is beats saying nothing, even when this
+        # machine cannot read it.
+        for location in self.locations:
+            location.accessor = NOT_SET
+
+        component = self.reader.read_components('v1')[0]
+
+        self.assertEqual(component.location_name, 'studio.local')
+        self.assertFalse(component.readable)
 
     def test_the_highest_priority_location_wins(self):
         self.locations[0]._availability = 0.0  # not in studio.local
         component = self.reader.read_components('v1')[0]
         self.assertEqual(component.location_name, 's3.studio.storage')
 
-    def test_a_location_without_filesystem_paths_still_counts_as_available(self):
-        # S3 can hold the file but cannot name a path for it.
+    def test_a_location_without_filesystem_paths_still_counts_as_readable(self):
+        # S3 has an accessor but cannot name a path.
         self.locations[0]._availability = 0.0
         self.locations[1]._path = None
 
         component = self.reader.read_components('v1')[0]
 
         self.assertTrue(component.available)
+        self.assertTrue(component.readable)
         self.assertIsNone(component.path)
 
     def test_builtin_locations_are_ignored(self):
         self.session.results['from Location'] = [
-            FakeLocation('ftrack.unmanaged', 0),
-            FakeLocation('studio.local', 1),
+            FakeLocation('ftrack.unmanaged', 0, accessor=object()),
+            FakeLocation('studio.local', 1, accessor=object()),
         ]
         component = self.reader.read_components('v1')[0]
         self.assertEqual(component.location_name, 'studio.local')
