@@ -46,6 +46,33 @@ def create(session: Any, context_store: Any) -> Any:
     NODE_ROLE = QtCore.Qt.UserRole + 1
     LOADING_ROLE = QtCore.Qt.UserRole + 2
 
+    def _location_summary(components: list) -> str:
+        '''Return where this version's files are, in one line.
+
+        Components usually share a location, so say it once; when they do not,
+        name each one rather than picking a winner.
+        '''
+        if not components:
+            return 'no components'
+
+        places = []
+        for component in components:
+            if not component.available:
+                places.append('nowhere')
+            elif component.readable:
+                places.append(component.location_name)
+            else:
+                places.append(
+                    '{0} (not set up here)'.format(component.location_name)
+                )
+
+        if len(set(places)) == 1:
+            return places[0]
+        return ', '.join(
+            '{0}: {1}'.format(component.name, place)
+            for component, place in zip(components, places)
+        )
+
     def warn(row: Any, explanation: str) -> None:
         '''Colour a component's location cell and say what is wrong with it.'''
         row.setForeground(3, QtGui.QBrush(QtGui.QColor(theme.WARNING)))
@@ -144,6 +171,16 @@ def create(session: Any, context_store: Any) -> Any:
             )
             self._components.setRootIsDecorated(False)
             self._components.setMaximumHeight(140)
+
+            # The first three take only what they need so Location keeps the
+            # rest; with default 100px columns it is the one that gets cut off
+            # when the panel is narrow, and it is the column people came for.
+            header = self._components.header()
+            for column in range(3):
+                header.setSectionResizeMode(
+                    column, QtWidgets.QHeaderView.ResizeToContents
+                )
+            header.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
             panel_layout.addWidget(self._components)
 
             panel_layout.addStretch(1)
@@ -324,6 +361,7 @@ def create(session: Any, context_store: Any) -> Any:
                 ('Author', info.author),
                 ('Date', info.date),
                 ('Task', info.task_name),
+                ('Location', _location_summary(info.components)),
             ]
             if info.comment:
                 rows.append(('Comment', info.comment))

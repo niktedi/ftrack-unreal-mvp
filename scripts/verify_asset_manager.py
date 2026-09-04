@@ -72,7 +72,7 @@ def check_component_display():
     Four situations that must not be conflated -- confusing them is what makes
     a failed import baffling half an hour later.
     '''
-    from PySide6 import QtCore
+    from PySide6 import QtCore, QtWidgets
 
     from ftrack_unreal.asset_manager.details import ComponentInfo, VersionDetails
 
@@ -143,6 +143,52 @@ def check_component_display():
         'unreachable={0}, readable brush={1}'.format(
             table.topLevelItem(2).foreground(3).color().name(),
             table.topLevelItem(0).foreground(3).style(),
+        ),
+    )
+
+    # -- the same fact, said once in the summary ------------------------
+
+    def summary_location():
+        form = window._info
+        for index in range(form.rowCount()):
+            label = form.itemAt(index, QtWidgets.QFormLayout.LabelRole)
+            field = form.itemAt(index, QtWidgets.QFormLayout.FieldRole)
+            if label and label.widget() and label.widget().text() == 'Location':
+                return field.widget().text()
+        return None
+
+    check(
+        'the details summary names the location too',
+        summary_location() == 'fbx: studio.local, abc: s3.studio.storage, '
+        'usd: s3.studio.storage (not set up here), exr: nowhere',
+        summary_location(),
+    )
+
+    same = ComponentInfo('fbx', 'fbx', 10, location_name='studio.local',
+                         path='D:/a.fbx', available=True, readable=True)
+    window._show_details(
+        VersionDetails(
+            version_id='v2', asset_name='camA', asset_type='Camera',
+            parent_name='sh010', version=4, status='WIP', author='',
+            date='', comment='', is_latest=True, task_name='',
+            components=[same, same], metadata={}, thumbnail_id=None,
+        ),
+        None,
+    )
+    check(
+        'components sharing a location say it once',
+        summary_location() == 'studio.local',
+        summary_location(),
+    )
+
+    # The column is the one that gets squeezed out when the panel is narrow.
+    window._components.resize(300, 140)
+    QtWidgets.QApplication.processEvents()
+    check(
+        'the Location column survives a narrow panel',
+        window._components.columnWidth(3) > 40,
+        'widths={0}'.format(
+            [window._components.columnWidth(i) for i in range(4)]
         ),
     )
 
