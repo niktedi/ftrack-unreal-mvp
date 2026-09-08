@@ -73,8 +73,17 @@ def get_shared_session(auto_connect_event_hub: bool = False) -> Any:
         )
 
     # Imported late: dependencies/ only reaches sys.path once Unreal has
-    # processed UE_PYTHONPATH.
-    import ftrack_api
+    # processed UE_PYTHONPATH. A bare ImportError here would escape as a
+    # traceback and take the menu with it, so it gets the same user-facing
+    # treatment as missing credentials.
+    try:
+        import ftrack_api
+    except ImportError as error:
+        raise FtrackSessionError(
+            'ftrack_api is not importable ({0}). The vendored dependencies '
+            'are missing -- run scripts/build_dependencies.py in the plugin '
+            'folder and restart Unreal.'.format(error)
+        )
 
     server = os.environ['FTRACK_SERVER']
     logger.info('Opening ftrack session (server=%s) ...', server)
@@ -115,7 +124,12 @@ def create_worker_session() -> Any:
             )
         )
 
-    import ftrack_api
+    try:
+        import ftrack_api
+    except ImportError as error:
+        raise FtrackSessionError(
+            'ftrack_api is not importable ({0}).'.format(error)
+        )
 
     try:
         return ftrack_api.Session(auto_connect_event_hub=False)

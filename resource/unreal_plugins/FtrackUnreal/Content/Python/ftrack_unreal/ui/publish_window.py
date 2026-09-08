@@ -21,12 +21,10 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from .. import CAMERA_ASSET_TYPE
 from ..logs import get_logger
 
 logger = get_logger(__name__)
-
-#: Asset type short code used for cameras.
-CAMERA_ASSET_TYPE = 'cam'
 
 
 def make_factory(session: Any, context_store: Any) -> Any:

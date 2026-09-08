@@ -29,23 +29,42 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPENDENCIES = os.path.join(REPO_ROOT, 'dependencies')
 REQUIREMENTS = os.path.join(REPO_ROOT, 'requirements.txt')
 
+#: Where ``UE_*`` folders live. The Epic launcher's default comes first; a
+#: source or relocated build usually sits at a drive root instead, which is why
+#: those are scanned too -- falling through to whatever Python is on PATH only
+#: shows up much later, as an import error inside the editor.
 EPIC_ROOT = r'C:\Program Files\Epic Games'
 PYTHON_SUBPATH = os.path.join(
     'Engine', 'Binaries', 'ThirdParty', 'Python3', 'Win64', 'python.exe'
 )
 
 
+def _engine_roots() -> List[str]:
+    '''Return the directories that may contain ``UE_*`` engine folders.'''
+    roots = [EPIC_ROOT]
+    roots.extend(
+        os.path.join(letter + ':', os.sep) for letter in 'CDEFGH'
+    )
+    return [root for root in roots if os.path.isdir(root)]
+
+
 def discover_engines() -> List[str]:
     '''Return installed engine roots, newest first.'''
-    if not os.path.isdir(EPIC_ROOT):
-        return []
+    engines = []
 
-    engines = [
-        os.path.join(EPIC_ROOT, name)
-        for name in os.listdir(EPIC_ROOT)
-        if name.startswith('UE_')
-        and os.path.isfile(os.path.join(EPIC_ROOT, name, PYTHON_SUBPATH))
-    ]
+    for root in _engine_roots():
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+
+        engines.extend(
+            os.path.join(root, name)
+            for name in names
+            if name.startswith('UE_')
+            and os.path.isfile(os.path.join(root, name, PYTHON_SUBPATH))
+        )
+
     return sorted(engines, reverse=True)
 
 

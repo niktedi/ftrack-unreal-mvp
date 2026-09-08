@@ -18,8 +18,14 @@ Targets ftrack Connect 24.11.0 and Unreal Engine 5.5 / 5.7 (Python 3.11.8).
 
 The MVP is feature-complete: the three menu items open working windows, plus
 *Reload integration*, which re-reads the Python without restarting the editor.
-Importing and updating assets is the next phase and is not started — the Asset
-Manager's Import and Update buttons are disabled with a tooltip saying so.
+
+The Asset Manager can import: select an FBX or Alembic component of a version
+and *Import* brings it into the open level. What it builds depends on the asset
+type — `cam` goes onto a new Level Sequence with its camera actor bound and the
+published frame range applied, anything else comes in as a static mesh with an
+actor placed on the level. Both land under `/Game/ftrack/<asset name>`.
+Updating an already-imported asset in place is the next phase and is not
+started — the Update button is disabled with a tooltip saying so.
 
 ## Install
 
@@ -350,6 +356,7 @@ console. Each prints a pass/fail list and cleans up after itself:
 | `verify_camera_export.py` | no | builds a throwaway sequence, exports a real FBX |
 | `verify_publish_window.py` | no | the Publish form: validation, name clashes, refresh on reopen |
 | `verify_asset_manager.py` | **yes** | the tree queries, lazy versions, details, preview cache |
+| `verify_import.py` | **yes** | importing a camera and a mesh for real, and every refusal |
 | `verify_change_context.py` | **yes** | the switch and its consequences, then switches back |
 
 The two that need ftrack are read-only against the server. Run them in an Unreal

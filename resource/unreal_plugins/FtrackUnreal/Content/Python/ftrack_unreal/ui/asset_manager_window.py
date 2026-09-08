@@ -39,12 +39,16 @@ def create(session: Any, context_store: Any) -> Any:
 
     from . import theme
     from .. import async_utils, unreal_env
+    from ..asset_manager import importer
     from ..asset_manager.details import DetailsReader
     from ..asset_manager.tree_model import ASSET, VERSION, TreeModel, matches
     from ..session import create_worker_session
 
     NODE_ROLE = QtCore.Qt.UserRole + 1
     LOADING_ROLE = QtCore.Qt.UserRole + 2
+    #: Index into `VersionDetails.components`, carried by the top-level rows of
+    #: the component table.
+    COMPONENT_ROLE = QtCore.Qt.UserRole + 3
 
     #: Was 200; the preview is orientation, not the point of the panel.
     PREVIEW_HEIGHT = 135
@@ -87,6 +91,7 @@ def create(session: Any, context_store: Any) -> Any:
             self._model: Optional[TreeModel] = None
             self._loading_versions = set()
             self._selected_version_id: Optional[str] = None
+            self._details: Optional[Any] = None
             self._busy = False
 
             self._build_ui()
@@ -197,14 +202,25 @@ def create(session: Any, context_store: Any) -> Any:
             # Takes the slack instead of a spacer, so it grows with the window.
             panel_layout.addWidget(self._components, 1)
 
+            self._components.itemSelectionChanged.connect(
+                self._refresh_import_button
+            )
+
             buttons = QtWidgets.QHBoxLayout()
             buttons.addStretch(1)
-            for label in ('Import', 'Update'):
-                button = QtWidgets.QPushButton(label)
-                button.setEnabled(False)
-                button.setToolTip('Arrives in the next phase')
-                buttons.addWidget(button)
+
+            self._import_button = QtWidgets.QPushButton('Import')
+            self._import_button.setEnabled(False)
+            self._import_button.clicked.connect(self._on_import)
+            buttons.addWidget(self._import_button)
+
+            self._update_button = QtWidgets.QPushButton('Update')
+            self._update_button.setEnabled(False)
+            self._update_button.setToolTip('Arrives in the next phase')
+            buttons.addWidget(self._update_button)
+
             panel_layout.addLayout(buttons)
+            self._refresh_import_button()
             return panel
 
         # -- loading the tree -----------------------------------------------
@@ -360,7 +376,10 @@ def create(session: Any, context_store: Any) -> Any:
 
         def _show_details(self, info: Any, preview: Optional[str]) -> None:
             self._clear_form()
+            self._details = info
             if info is None:
+                self._components.clear()
+                self._refresh_import_button()
                 self._say('That version could not be read.', error=True)
                 return
 
@@ -389,7 +408,7 @@ def create(session: Any, context_store: Any) -> Any:
                 form.addRow(label, field)
 
             self._components.clear()
-            for component in info.components:
+            for index, component in enumerate(info.components):
                 row = QtWidgets.QTreeWidgetItem(
                     [
                         component.name,
@@ -398,6 +417,7 @@ def create(session: Any, context_store: Any) -> Any:
                         '',
                     ]
                 )
+                row.setData(0, COMPONENT_ROLE, index)
                 self._components.addTopLevelItem(row)
 
                 if component.locations_unknown:
@@ -453,6 +473,7 @@ def create(session: Any, context_store: Any) -> Any:
                 row.setExpanded(True)
 
             self._set_preview(preview)
+            self._refresh_import_button()
             self._say('')
 
         def _set_preview(self, path: Optional[str]) -> None:
@@ -477,9 +498,11 @@ def create(session: Any, context_store: Any) -> Any:
 
         def _clear_details(self, node: Any) -> None:
             self._selected_version_id = None
+            self._details = None
             self._clear_form()
             self._components.clear()
             self._set_preview(None)
+            self._refresh_import_button()
             if node is None:
                 self._heading.setText('Select a version')
             else:
@@ -503,6 +526,108 @@ def create(session: Any, context_store: Any) -> Any:
                     if name and name.widget() and name.widget().text() == label:
                         return value.widget().text()
             return None
+
+        # -- importing ------------------------------------------------------
+
+        def _selected_component(self) -> Any:
+            '''Return the selected ComponentInfo, or ``None``.
+
+            A location row stands for its parent component, so clicking one
+            counts as selecting the file it belongs to.
+            '''
+            if self._details is None:
+                return None
+
+            item = self._components.currentItem()
+            if item is None:
+                return None
+            if item.parent() is not None:
+                item = item.parent()
+
+            index = item.data(0, COMPONENT_ROLE)
+            if index is None:
+                return None
+            try:
+                return self._details.components[index]
+            except IndexError:
+                return None
+
+        def _refresh_import_button(self) -> None:
+            '''Enable Import for an FBX or Alembic component, and say what it
+            would do.'''
+            component = self._selected_component()
+
+            if component is None:
+                self._import_button.setEnabled(False)
+                self._import_button.setToolTip(
+                    'Select an FBX or Alembic component below to import it.'
+                )
+                return
+
+            if not component.importable:
+                self._import_button.setEnabled(False)
+                self._import_button.setToolTip(
+                    'Cannot import a .{0} file; only FBX and Alembic '
+                    'components can be imported.'.format(
+                        component.file_type or '?'
+                    )
+                )
+                return
+
+            self._import_button.setEnabled(not self._busy)
+            self._import_button.setToolTip(
+                importer.describe(
+                    component.file_type, self._details.asset_type_short
+                )
+            )
+
+        def _on_import(self) -> None:
+            '''Import the selected component into the open level.'''
+            component = self._selected_component()
+            if component is None or self._details is None:
+                return
+
+            path = component.local_path
+            if not path:
+                # Enabled but not actionable: the file is published somewhere
+                # this machine cannot read. Say which, rather than failing in
+                # the importer with a blank path.
+                self._say(
+                    '"{0}" is in {1}, and this machine cannot name a file '
+                    'path there. Transfer it to a local location first.'.format(
+                        component.name,
+                        component.location_names or 'no storage location',
+                    ),
+                    error=True,
+                )
+                return
+
+            self._set_busy(True)
+            self._say('Importing {0}...'.format(component.name))
+
+            try:
+                # Synchronous and on the game thread: the import and the actor
+                # it spawns are both editor-only work.
+                result = importer.import_component(
+                    file_path=path,
+                    file_type=component.file_type,
+                    asset_name=self._details.asset_name,
+                    asset_type_short=self._details.asset_type_short,
+                    version=self._details.version,
+                    metadata=self._details.metadata,
+                )
+            except importer.AssetImportError as error:
+                self._say(str(error), error=True)
+                self._set_busy(False)
+                return
+            except Exception as error:
+                logger.exception('The import failed.')
+                self._say('The import failed: {0}'.format(error), error=True)
+                self._set_busy(False)
+                return
+
+            self._say(result.summary)
+            self._set_busy(False)
 
         # -- filtering ------------------------------------------------------
 
@@ -541,6 +666,7 @@ def create(session: Any, context_store: Any) -> Any:
         def _set_busy(self, busy: bool) -> None:
             self._busy = busy
             self._reload_button.setEnabled(not busy)
+            self._refresh_import_button()
 
         def _say(self, message: str, error: bool = False) -> None:
             self._message.setText(message)

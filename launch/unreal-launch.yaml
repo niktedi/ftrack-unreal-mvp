@@ -25,10 +25,10 @@ search_path:
     # Bounded os.walk: one regex per directory level below the prefix.
     # C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor.exe
     prefix:
-      - C:\
-      - Program Files.*
+      - D:\
+      #- Program Files.*
     expression:
-      - Epic Games
+      #- Epic Games
       - UE_.*
       - Engine
       - Binaries

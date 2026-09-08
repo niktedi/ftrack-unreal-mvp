@@ -40,6 +40,10 @@ BUILTIN_LOCATION_NAMES = frozenset(
 
 THUMBNAIL_SIZE = 512
 
+#: Component file types the Asset Manager can bring into the level. Kept here
+#: rather than in `importer` so the window can ask without importing `unreal`.
+IMPORTABLE_FILE_TYPES = frozenset(('fbx', 'abc'))
+
 COMPONENTS_PROJECTION = (
     'select id, name, file_type, size, version_id '
     'from Component where version_id is "{0}"'
@@ -67,7 +71,8 @@ COMPONENT_LOCATIONS_PROJECTION = (
 VERSION_PROJECTION = (
     'select id, version, comment, date, is_latest_version, thumbnail_id, '
     'status.name, user.first_name, user.last_name, metadata, '
-    'asset.id, asset.name, asset.type.name, asset.parent.name, '
+    'asset.id, asset.name, asset.type.name, asset.type.short, '
+    'asset.parent.name, '
     'task.id, task.name, link '
     'from AssetVersion where id is "{0}"'
 )
@@ -128,6 +133,11 @@ class ComponentInfo:
         return ', '.join(location.name for location in self.locations)
 
     @property
+    def importable(self) -> bool:
+        '''Whether this file is one the Asset Manager can import.'''
+        return self.file_type.lower() in IMPORTABLE_FILE_TYPES
+
+    @property
     def size_label(self) -> str:
         return format_size(self.size)
 
@@ -138,7 +148,11 @@ class VersionDetails:
 
     version_id: str
     asset_name: str
+    #: Display name of the asset type, e.g. ``Camera``.
     asset_type: str
+    #: Short code of the asset type, e.g. ``cam``. This is what decides how a
+    #: component is imported; the display name is only ever shown.
+    asset_type_short: str
     parent_name: str
     version: int
     status: str
@@ -205,6 +219,7 @@ class DetailsReader:
             version_id=version['id'],
             asset_name=asset.get('name') or '',
             asset_type=(asset.get('type') or {}).get('name') or '',
+            asset_type_short=(asset.get('type') or {}).get('short') or '',
             parent_name=(asset.get('parent') or {}).get('name') or '',
             version=version['version'],
             status=(version['status'] or {}).get('name') or '',
