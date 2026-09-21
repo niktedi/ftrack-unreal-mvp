@@ -37,7 +37,7 @@ def create(session: Any, context_store: Any) -> Any:
     '''Build the Asset Manager window.'''
     from PySide6 import QtCore, QtGui, QtWidgets
 
-    from . import theme
+    from . import sequence_picker, theme
     from .. import async_utils, unreal_env
     from ..asset_manager import importer
     from ..asset_manager.details import DetailsReader
@@ -93,6 +93,10 @@ def create(session: Any, context_store: Any) -> Any:
             self._selected_version_id: Optional[str] = None
             self._details: Optional[Any] = None
             self._busy = False
+            #: The open sequence picker and message box, held so Qt does not
+            #: collect them the moment the handler that opened them returns.
+            self._picker: Optional[Any] = None
+            self._note_box: Optional[Any] = None
 
             self._build_ui()
             self.refresh()
@@ -582,7 +586,7 @@ def create(session: Any, context_store: Any) -> Any:
             )
 
         def _on_import(self) -> None:
-            '''Import the selected component into the open level.'''
+            '''Import the selected component, asking where to first if needed.'''
             component = self._selected_component()
             if component is None or self._details is None:
                 return
@@ -602,6 +606,72 @@ def create(session: Any, context_store: Any) -> Any:
                 )
                 return
 
+            if importer.is_camera(self._details.asset_type_short):
+                self._ask_for_sequence(component, path)
+                return
+
+            self._run_import(component, path)
+
+        def _ask_for_sequence(self, component: Any, path: str) -> None:
+            '''Open the picker, and import onto whichever sequence comes back.
+
+            The component and its path are captured here rather than read again
+            when the picker closes: it is not modal to the editor, so the
+            selection in the tree may well have moved on by then, and the
+            import must be the one the user asked for.
+            '''
+            # No progress line before this: it cannot repaint until the
+            # handler returns, and by then there is a real message to show.
+            sequences = importer.list_level_sequences()
+
+            if not sequences:
+                self._say('No level sequence found.', error=True)
+                self._show_note(
+                    'Import camera', 'No level sequence found. Create one first.'
+                )
+                return
+
+            details = self._details
+            self._set_busy(True)
+            self._say(
+                'Choose a level sequence for {0} v{1:03d}.'.format(
+                    details.asset_name, details.version
+                )
+            )
+
+            def on_chosen(sequence_path: str) -> None:
+                self._run_import(component, path, details, sequence_path)
+
+            picker = sequence_picker.open_picker(
+                self,
+                sequences,
+                on_chosen,
+                message='{0} v{1:03d} -- {2}'.format(
+                    details.asset_name, details.version, component.name
+                ),
+            )
+            # Released here rather than in ``on_chosen``: ``finished`` is
+            # emitted first, so a cancel leaves the window usable and an
+            # accept has _run_import set it again a moment later.
+            picker.finished.connect(lambda _result: self._set_busy(False))
+            # Held so the dialog is not collected at the end of this handler.
+            # Replaced, not cleared on close: dropping the last reference from
+            # inside the dialog's own ``done`` is how a widget outlives its
+            # wrapper.
+            self._picker = picker
+
+        def _run_import(
+            self,
+            component: Any,
+            path: str,
+            details: Optional[Any] = None,
+            sequence_path: Optional[str] = None,
+        ) -> None:
+            '''Do the import and report what it produced.'''
+            details = details if details is not None else self._details
+            if details is None:
+                return
+
             self._set_busy(True)
             self._say('Importing {0}...'.format(component.name))
 
@@ -611,10 +681,11 @@ def create(session: Any, context_store: Any) -> Any:
                 result = importer.import_component(
                     file_path=path,
                     file_type=component.file_type,
-                    asset_name=self._details.asset_name,
-                    asset_type_short=self._details.asset_type_short,
-                    version=self._details.version,
-                    metadata=self._details.metadata,
+                    asset_name=details.asset_name,
+                    asset_type_short=details.asset_type_short,
+                    version=details.version,
+                    metadata=details.metadata,
+                    sequence_path=sequence_path,
                 )
             except importer.AssetImportError as error:
                 self._say(str(error), error=True)
@@ -628,6 +699,27 @@ def create(session: Any, context_store: Any) -> Any:
 
             self._say(result.summary)
             self._set_busy(False)
+
+        def _show_note(self, title: str, message: str) -> None:
+            '''Show a message box with an OK button that closes it.
+
+            Qt's rather than ``unreal_env.show_message``: this is called from
+            inside a Qt click handler, which runs inside the Slate post-tick
+            that pumps Qt, and an editor-modal dialog opened there would run a
+            nested Slate tick inside that pump. ``show()`` rather than
+            ``exec()`` for the same reason the picker uses it -- see
+            ``sequence_picker``.
+            '''
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setText(message)
+            box.setIcon(QtWidgets.QMessageBox.Information)
+            box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+            box.setModal(True)
+            logger.info('%s: %s', title, message)
+            box.show()
+            box.raise_()
+            self._note_box = box
 
         # -- filtering ------------------------------------------------------
 

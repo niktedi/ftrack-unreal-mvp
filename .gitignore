@@ -1,0 +1,5 @@
+# Vendored at install time by scripts/build_dependencies.py (~217 MB).
+dependencies/
+
+__pycache__/
+*.py[cod]

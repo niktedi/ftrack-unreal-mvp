@@ -21,9 +21,22 @@ The MVP is feature-complete: the three menu items open working windows, plus
 
 The Asset Manager can import: select an FBX or Alembic component of a version
 and *Import* brings it into the open level. What it builds depends on the asset
-type — `cam` goes onto a new Level Sequence with its camera actor bound and the
-published frame range applied, anything else comes in as a static mesh with an
-actor placed on the level. Both land under `/Game/ftrack/<asset name>`.
+type.
+
+`cam` goes onto a Level Sequence **the user picks** — *Import* opens a list of
+the sequences already in the project, and the camera actor is spawned and bound
+on the chosen one. A camera belongs in the shot sequence it was shot for, and
+only the person importing it knows which that is; a freshly created sequence
+would be one more thing to find and clean up. A project with no sequence at all
+is refused with *No level sequence found. Create one first.* rather than having
+one made for it. The published frame range is applied only when the chosen
+sequence was empty — on a sequence that already has bindings the playback range
+is the user's shot setup, and replacing it could cut the shot short, so it is
+left alone and the published range is reported instead.
+
+Anything else comes in as a static mesh, under `/Game/ftrack/<asset name>`,
+with an actor placed on the level.
+
 Updating an already-imported asset in place is the next phase and is not
 started — the Update button is disabled with a tooltip saying so.
 
@@ -113,7 +126,7 @@ no engine install.
 | `context.py` | `menu.py` |
 | `publish/publisher.py` | `ui/qt_app.py` |
 | `asset_manager/tree_model.py` | `publish/camera_fbx.py`, `publish/thumbnail.py` |
-| | `asset_manager/details.py` |
+| | `asset_manager/details.py`, `asset_manager/importer.py` |
 
 `logs.py` sits on the boundary: it imports `unreal` inside a `try`, so the same
 module gives Output Log severity routing inside the editor and a plain stream
@@ -154,6 +167,20 @@ the editor rather than just the tool:
   window shuts Qt down for the whole editor session.
 - **Parent windows to Slate** via `unreal.parent_external_window_to_slate`, so
   they stay in front of the editor and minimise with it.
+
+The same rule reaches dialogs, which is why there are none that block.
+`QDialog.exec()` and `QMessageBox.exec()` each start a *nested* Qt event loop on
+the game thread — the thread that ticks Slate, which is what pumps Qt — so the
+editor stops redrawing until the dialog closes. The sequence picker and the
+messages beside it are therefore shown with `show()` and report through a
+callback (`ui/sequence_picker.py`). They are `setModal(True)`, which is modality
+*within Qt*: it blocks input to the other ftrack windows without taking the
+thread.
+
+The converse also holds: `unreal_env.show_message` is an editor-modal Slate
+dialog, so calling it from inside a Qt click handler would run a nested Slate
+tick inside the Qt pump. Reach for it from menu callbacks and start-up, not from
+inside a window.
 
 `qt_app.show(name, factory, title)` is the single entry point: it creates the
 application once, keeps one window per tool name (a second menu click raises the
@@ -356,7 +383,7 @@ console. Each prints a pass/fail list and cleans up after itself:
 | `verify_camera_export.py` | no | builds a throwaway sequence, exports a real FBX |
 | `verify_publish_window.py` | no | the Publish form: validation, name clashes, refresh on reopen |
 | `verify_asset_manager.py` | **yes** | the tree queries, lazy versions, details, preview cache |
-| `verify_import.py` | **yes** | importing a camera and a mesh for real, and every refusal |
+| `verify_import.py` | **yes** | the sequence listing, importing a camera and a mesh for real, and every refusal |
 | `verify_change_context.py` | **yes** | the switch and its consequences, then switches back |
 
 The two that need ftrack are read-only against the server. Run them in an Unreal
