@@ -16,6 +16,9 @@ documentation:
 ``unreal.MovieSceneSequenceExtensions``
     ``get_bindings``, ``get_tracks``, ``get_display_rate``,
     ``get_playback_start``, ``get_playback_end``.
+``unreal.MovieSceneBindingExtensions.get_child_possessables``
+    the CameraComponent binding under a camera actor (from the UE 5.7
+    headers; confirmed by ``scripts/verify_render_publish.py``).
 '''
 
 from __future__ import annotations
@@ -49,6 +52,16 @@ class SequenceEntry:
     @property
     def label(self) -> str:
         return '{0}  ({1})'.format(self.name, self.package_path)
+
+
+@dataclass
+class ExportedCamera:
+    '''One camera written to its own FBX by :func:`export_cameras`.'''
+
+    #: The binding's display name in Sequencer, e.g. ``shotcam``.
+    label: str
+    binding_id: str
+    path: str
 
 
 @dataclass
@@ -183,7 +196,6 @@ def export_level_sequence(
         ExportError: With a message meant for the user.
     '''
     sequence = load_sequence(package_path)
-    world = _editor_world()
 
     bindings = unreal.MovieSceneSequenceExtensions.get_bindings(sequence)
     tracks = unreal.MovieSceneSequenceExtensions.get_tracks(sequence)
@@ -193,6 +205,101 @@ def export_level_sequence(
             'The level sequence {0} has nothing bound to it, so there is no '
             'camera to export.'.format(package_path)
         )
+
+    return _export(
+        sequence, bindings, tracks, output_path, package_path, ascii_format
+    )
+
+
+def export_cameras(package_path: str, output_dir: str) -> List[ExportedCamera]:
+    '''Export every camera on the Level Sequence to its own FBX.
+
+    Only the sequence's own bindings -- cameras inside sub-sequences are not
+    looked at. Each file holds the camera actor's binding plus its child
+    bindings: the CameraComponent under the actor is where focal length and
+    focus distance are animated, and leaving it out would bake a camera that
+    moves but never zooms. Master tracks (camera cuts, audio, fades) are left
+    out; they are not the camera's.
+
+    Args:
+        package_path: e.g. ``/Game/Cinematics/Seq_010``.
+        output_dir: Directory to write ``<camera label>.fbx`` into.
+
+    Returns:
+        One entry per camera, in binding order.
+
+    Raises:
+        ExportError: If the sequence has no camera, or any camera fails --
+            a version that promises the cameras must not carry half of them.
+    '''
+    # Imported here: the asset manager's helpers are the ones that know a
+    # camera actor from its component, and nothing else in this module needs
+    # them.
+    from ..asset_manager import scene_cameras
+
+    sequence = load_sequence(package_path)
+    cameras = scene_cameras.cameras_in(package_path)
+    if not cameras:
+        raise ExportError(
+            'The level sequence {0} has no camera to export.'.format(package_path)
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+    taken = set()
+    exported = []
+    for camera in cameras:
+        binding = scene_cameras.find_binding(sequence, camera.binding_id)
+        if binding is None:
+            raise ExportError(
+                'The camera {0} disappeared from {1} while exporting.'.format(
+                    camera.label, package_path
+                )
+            )
+
+        try:
+            children = list(
+                unreal.MovieSceneBindingExtensions.get_child_possessables(binding)
+            )
+        except Exception as error:
+            logger.warning(
+                'Could not read the child bindings of %s: %s', camera.label, error
+            )
+            children = []
+
+        stem = _file_safe(camera.label)
+        name = stem
+        suffix = 1
+        while name.lower() in taken:
+            suffix += 1
+            name = '{0}_{1}'.format(stem, suffix)
+        taken.add(name.lower())
+
+        path = os.path.join(output_dir, name + '.fbx')
+        _export(
+            sequence,
+            [binding] + children,
+            [],
+            path,
+            '{0} ({1})'.format(package_path, camera.label),
+        )
+        exported.append(
+            ExportedCamera(label=camera.label, binding_id=camera.binding_id, path=path)
+        )
+
+    logger.info('Exported %d camera(s) from %s', len(exported), package_path)
+    return exported
+
+
+def _export(
+    sequence: Any,
+    bindings: List[Any],
+    tracks: List[Any],
+    output_path: str,
+    description: str,
+    ascii_format: bool = False,
+) -> str:
+    '''Write *bindings* and *tracks* of *sequence* to *output_path*.'''
+    world = _editor_world()
 
     directory = os.path.dirname(output_path)
     if directory:
@@ -219,7 +326,7 @@ def export_level_sequence(
 
     logger.info(
         'Exporting %s (%d binding(s), %d track(s)) to %s',
-        package_path,
+        description,
         len(bindings),
         len(tracks),
         output_path,
@@ -233,7 +340,7 @@ def export_level_sequence(
     if not exported:
         raise ExportError(
             'Unreal refused to export {0}. The Output Log will say why.'.format(
-                package_path
+                description
             )
         )
 
@@ -250,6 +357,15 @@ def export_level_sequence(
         os.path.getsize(output_path) / 1024.0,
     )
     return output_path
+
+
+def _file_safe(name: str) -> str:
+    '''Return *name* reduced to characters that are safe in a file name.'''
+    cleaned = ''.join(
+        character if character.isalnum() or character in '-_' else '_'
+        for character in (name or '').strip()
+    )
+    return cleaned or 'camera'
 
 
 def _editor_world() -> Any:

@@ -4,9 +4,12 @@
 
 Two halves:
 
-* The window -- a throwaway Level Sequence is ticked and unticked, its tab is
+* The window -- two throwaway Level Sequences, one with a camera and one
+  without. Only the first may be listed. It is ticked and unticked, its tab is
   filled from the sequence, validation and the busy state are exercised. No
   ftrack session is needed; the ftrack data is fed in directly.
+* The camera export -- the probe camera is written to its own FBX, the way
+  the render loop does before each render.
 * The render -- the same sequence is rendered for real through the Movie
   Render Queue, three PNG frames into ``Saved/ftrack/render``, and the frames
   are found again the way the publish finds them. This is what pins the MRQ
@@ -31,12 +34,13 @@ import os
 import unreal  # pyright: ignore[reportMissingImports]
 
 from ftrack_unreal import unreal_env
-from ftrack_unreal.publish import image_sequence, mrq_render
+from ftrack_unreal.publish import camera_fbx, image_sequence, mrq_render
 from ftrack_unreal.ui import qt_app, render_publish_window
 
 PROBE_PACKAGE = '/Game/FtrackRenderPublishCheck'
 PROBE_NAME = 'Seq_FtrackRenderPublishCheck'
 PROBE_SEQUENCE = PROBE_PACKAGE + '/' + PROBE_NAME
+PROBE_EMPTY_SEQUENCE = PROBE_PACKAGE + '/Seq_FtrackRenderPublishCheckEmpty'
 PROBE_ACTOR_LABEL = 'ftrackRenderPublishCheckCam'
 
 #: Three frames, deliberately not starting at zero, so an off-by-one in the
@@ -106,6 +110,15 @@ def build():
         )
 
     unreal.EditorAssetLibrary.save_loaded_asset(sequence)
+
+    # No binding at all: must not be offered for rendering.
+    empty = tools.create_asset(
+        PROBE_EMPTY_SEQUENCE.rsplit('/', 1)[-1],
+        PROBE_PACKAGE,
+        unreal.LevelSequence,
+        unreal.LevelSequenceFactoryNew(),
+    )
+    unreal.EditorAssetLibrary.save_loaded_asset(empty)
     return camera
 
 
@@ -148,10 +161,19 @@ def check_window():
     )
     check('window constructed and shown', window is not None and window.isVisible())
 
+    # The scan runs on a timer, and the timer only fires between console
+    # commands; drive it by hand so the checks below see the finished list.
+    while window._scanning():
+        window._scan_slice()
+
     check(
         'the probe sequence is listed',
         PROBE_SEQUENCE in window._items,
         sorted(window._items)[:5],
+    )
+    check(
+        'a sequence without a camera is not listed',
+        PROBE_EMPTY_SEQUENCE not in window._items,
     )
     check('render disabled with nothing ticked', not window._run_button.isEnabled())
 
@@ -170,6 +192,11 @@ def check_window():
         '{0}-{1}'.format(tab.start_spin.value(), tab.end_spin.value()),
     )
     check('the asset is named after the sequence', tab.asset_name() == PROBE_NAME)
+    check(
+        'the tab lists the camera',
+        tab.cameras == [PROBE_ACTOR_LABEL],
+        tab.cameras,
+    )
 
     window._on_ftrack_data(
         {
@@ -214,6 +241,34 @@ def check_window():
 
     item.setCheckState(PUBLISH_COLUMN, QtCore.Qt.Unchecked)
     check('unticking removes the tab', window._tab_widget.count() == 0)
+
+
+def check_camera_export():
+    output_dir = unreal_env.get_render_dir(PROBE_NAME) + '_cameras'
+    try:
+        cameras = camera_fbx.export_cameras(PROBE_SEQUENCE, output_dir)
+    except camera_fbx.ExportError as error:
+        check('the camera exports to FBX', False, str(error))
+        return
+    check('one FBX per camera', len(cameras) == 1, [c.label for c in cameras])
+    if cameras:
+        path = cameras[0].path
+        check(
+            'the FBX is written and not empty',
+            os.path.isfile(path) and os.path.getsize(path) > 0,
+            path,
+        )
+        check(
+            'the FBX is named after the camera',
+            os.path.basename(path) == PROBE_ACTOR_LABEL + '.fbx',
+            os.path.basename(path),
+        )
+
+    try:
+        camera_fbx.export_cameras(PROBE_EMPTY_SEQUENCE, output_dir)
+        check('a sequence without a camera is refused', False)
+    except camera_fbx.ExportError as error:
+        check('a sequence without a camera is refused', True, str(error))
 
 
 def start_render():
@@ -280,6 +335,7 @@ def main():
     try:
         _state['camera'] = build()
         check_window()
+        check_camera_export()
     except Exception as error:
         check('window half ran', False, repr(error))
         clean_up()

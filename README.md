@@ -77,9 +77,16 @@ binding to update. The Asset Manager's own Update button stays disabled.
 ### Publish Render
 
 *ftrack → Publish Render* renders Level Sequences with the Movie Render Queue
-and publishes the frames. The left panel lists every Level Sequence in the
-project with a *Publish* tick box. Each ticked sequence gets its own tab of
-settings on the right:
+and publishes the frames together with the cameras they were shot through.
+The left panel lists every Level Sequence in the project **that has a camera**,
+with a *Publish* tick box. Sequences without one are left out: there would be
+no camera to publish with the render. Finding the cameras means loading every
+sequence, so the list fills in over a few seconds, sliced over timer ticks the
+same way as in *Update Camera*. *Render & Publish* is disabled until the list
+has finished filling.
+
+Each ticked sequence gets its own tab of settings on the right. The tab also
+shows, read-only, which cameras will be exported:
 
 - **Asset name**: the sequence name by default. A hint says whether the asset
   already exists (a new version) or will be created.
@@ -95,11 +102,30 @@ settings on the right:
 **Render & Publish** takes the sequences one at a time, in tab order. For each
 one it:
 
-1. renders into a fresh `Saved/ftrack/render/<sequence>/<timestamp>`, so frames
+1. exports each of the sequence's cameras to its own FBX in
+   `<render dir>_cameras/<camera>.fbx`. Only the sequence's own camera bindings
+   count; sub-sequences are not searched. Each file holds the camera actor plus
+   its CameraComponent, so focal length and focus animation come along;
+2. renders into a fresh `Saved/ftrack/render/<sequence>/<timestamp>`, so frames
    left over from an earlier render cannot leak into this one;
-2. finds the frames on disk and publishes them as a single image-sequence
-   component (`exr`, `png` or `jpg`) on an asset of type `render` under the
-   chosen task's parent.
+3. finds the frames on disk and publishes **one version** on an asset of type
+   `render` under the chosen task's parent. The version holds:
+   - the frames, as a single image-sequence component named after the Level
+     Sequence it was rendered from, e.g. `SEQ_010`. The image format is in its
+     metadata (`image_format`). A preset that writes several render passes
+     gives one component per pass: `SEQ_010_<pass>`;
+   - one `camera_<name>` FBX component per camera, with metadata
+     `content=camera`, `camera_name`, `binding_id`, `level_sequence_path`,
+     `frame_start`, `frame_end` and `fps`.
+
+The cameras are exported before the render, from the sequence as it stands,
+so the FBX and the frames describe the same state of the shot. If the export
+fails, that sequence is marked failed and not rendered, rather than published
+without its cameras.
+
+*Import* in the Asset Manager does not yet know about these components. It
+chooses camera or geometry by the asset type, and on a `render` version it
+would bring an FBX in as geometry.
 
 The *Result* column shows how far each sequence got. A failure there comes with
 its reason in the tooltip, and the loop moves on to the next sequence. *Cancel*
@@ -504,7 +530,7 @@ console. Each prints a pass/fail list and cleans up after itself:
 |---|---|---|
 | `verify_camera_export.py` | no | builds a throwaway sequence, exports a real FBX |
 | `verify_publish_window.py` | no | the Publish form: validation, name clashes, refresh on reopen |
-| `verify_render_publish.py` | no | the Publish Render window, then a real 3-frame MRQ render found again as a sequence (needs a saved level) |
+| `verify_render_publish.py` | no | the Publish Render window (only sequences with a camera listed), the per-camera FBX export, then a real 3-frame MRQ render found again as a sequence (needs a saved level) |
 | `verify_asset_manager.py` | **yes** | the tree queries, lazy versions, details, preview cache |
 | `verify_import.py` | **yes** | the sequence listing, importing a camera and a mesh for real, and every refusal |
 | `verify_change_context.py` | **yes** | the switch and its consequences, then switches back |

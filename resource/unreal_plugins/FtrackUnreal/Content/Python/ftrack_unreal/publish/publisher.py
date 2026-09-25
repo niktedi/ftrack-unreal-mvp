@@ -38,6 +38,25 @@ BUILTIN_LOCATION_NAMES = frozenset(
 )
 
 
+def unique_names(names: List[str]) -> List[str]:
+    '''Return *names* with repeats made unique: ``cam``, ``cam_2``, ``cam_3``.
+
+    Component names must be unique within a version, and two cameras can
+    share a label. Compared case-insensitively, because people do.
+    '''
+    taken = set()
+    result = []
+    for name in names:
+        candidate = name
+        suffix = 1
+        while candidate.lower() in taken:
+            suffix += 1
+            candidate = '{0}_{1}'.format(name, suffix)
+        taken.add(candidate.lower())
+        result.append(candidate)
+    return result
+
+
 def asset_matches_type(asset: Any, short: str) -> bool:
     '''Return whether *asset* is of the asset type *short*.
 

@@ -3,11 +3,15 @@
 '''The Publish Render window: Level Sequences through the Movie Render Queue
 into ftrack.
 
-Left, every Level Sequence in the project with a tick box. Right, one tab of
-publish settings per ticked sequence. *Render & Publish* then works through the
-ticked sequences one at a time: render with MRQ, find the frames, publish them
-as an image-sequence component on an asset of type ``render`` named after the
-sequence.
+Left, every Level Sequence in the project that has a camera, with a tick box.
+Right, one tab of publish settings per ticked sequence. *Render & Publish* then
+works through the ticked sequences one at a time:
+
+1. export each of the sequence's cameras to its own FBX;
+2. render with MRQ and find the frames;
+3. publish one version on an asset of type ``render`` named after the sequence.
+   It holds the frames as an image-sequence component named after the Level
+   Sequence, and one ``camera_<name>`` FBX component per camera.
 
 Threading follows the Publish window:
 
@@ -33,6 +37,12 @@ from ..logs import get_logger
 
 logger = get_logger(__name__)
 
+#: Level Sequences loaded per scan tick, and the gap between ticks -- the same
+#: slicing as Update Camera, for the same reason: finding the cameras means
+#: loading each sequence, on the thread that draws the editor.
+SCAN_BATCH = 4
+SCAN_INTERVAL_MS = 16
+
 #: Generous: a publish uploads every frame into the location, and hundreds of
 #: EXRs over a studio network take far longer than a camera FBX.
 PUBLISH_TIMEOUT_SECONDS = 4 * 60 * 60.0
@@ -53,6 +63,7 @@ def create(session: Any, context_store: Any) -> Any:
 
     from . import theme
     from .. import RENDER_ASSET_TYPE, async_utils, unreal_env
+    from ..asset_manager import scene_cameras
     from ..context import query_user_tasks
     from ..publish import camera_fbx, image_sequence, mrq_render, thumbnail
     from ..publish.publisher import (
@@ -61,6 +72,7 @@ def create(session: Any, context_store: Any) -> Any:
         PublishRequest,
         Publisher,
         asset_matches_type,
+        unique_names,
     )
     from ..session import create_publish_session, create_worker_session
 
@@ -81,10 +93,13 @@ def create(session: Any, context_store: Any) -> Any:
         #: The target task changed; carries the new task's parent id.
         taskChanged = QtCore.Signal(object)
 
-        def __init__(self, entry: Any, defaults: Dict[str, Any]) -> None:
+        def __init__(
+            self, entry: Any, defaults: Dict[str, Any], cameras: List[str]
+        ) -> None:
             super().__init__()
             self.entry = entry
             self.defaults = defaults
+            self.cameras = cameras
             self._existing: Optional[List[str]] = None
             self._parent_name = ''
             self._build()
@@ -106,6 +121,14 @@ def create(session: Any, context_store: Any) -> Any:
             self.name_hint.setWordWrap(True)
             self.name_hint.setStyleSheet('color: {0};'.format(theme.MUTED))
             form.addRow('', self.name_hint)
+
+            cameras_label = QtWidgets.QLabel(', '.join(self.cameras))
+            cameras_label.setWordWrap(True)
+            cameras_label.setToolTip(
+                'Exported to FBX before the render and published in the same '
+                'version, one component per camera'
+            )
+            form.addRow('Cameras', cameras_label)
 
             self.task_combo = QtWidgets.QComboBox()
             self.task_combo.setSizeAdjustPolicy(
@@ -304,6 +327,11 @@ def create(session: Any, context_store: Any) -> Any:
             self.resize(980, 640)
 
             self._sequences: List[Any] = []
+            #: package path -> labels of the cameras found on it.
+            self._cameras: Dict[str, List[str]] = {}
+            self._scan_timer: Optional[Any] = None
+            self._scan_pending: List[str] = []
+            self._scan_found: List[Any] = []
             self._tabs: Dict[str, SequenceTab] = {}
             self._items: Dict[str, Any] = {}
             self._tasks: List[Dict[str, Any]] = []
@@ -464,27 +492,110 @@ def create(session: Any, context_store: Any) -> Any:
         # -- sequences ------------------------------------------------------
 
         def _load_sequences(self) -> None:
-            '''Read the Asset Registry. Cheap, and must be on the game thread.'''
+            '''Start scanning for the sequences that have a camera.
+
+            Only those are listed: their cameras are published with the
+            render. Knowing that means loading each sequence, so the scan is
+            sliced over timer ticks and the editor keeps drawing meanwhile.
+            '''
+            self._stop_scan()
+            try:
+                self._scan_pending = scene_cameras.sequence_paths()
+            except Exception as error:
+                logger.exception('Could not list the level sequences.')
+                self._say(
+                    'Could not list the level sequences: {0}'.format(error),
+                    error=True,
+                )
+                return
+
+            self._scan_found = []
+            if not self._scan_pending:
+                self._finish_scan()
+                return
+
+            self._say(
+                'Looking for cameras in {0} level sequence(s)...'.format(
+                    len(self._scan_pending)
+                )
+            )
+            self._scan_timer = QtCore.QTimer(self)
+            self._scan_timer.setInterval(SCAN_INTERVAL_MS)
+            self._scan_timer.timeout.connect(self._scan_slice)
+            self._scan_timer.start()
+            self._refresh_enabled()
+
+        def _scan_slice(self) -> None:
+            '''Read the next few sequences, then hand back to the editor.'''
+            for _ in range(min(SCAN_BATCH, len(self._scan_pending))):
+                path = self._scan_pending.pop(0)
+                try:
+                    cameras = scene_cameras.cameras_in(path)
+                except Exception:
+                    # cameras_in swallows its own failures; one bad asset
+                    # must not end the scan half way through regardless.
+                    logger.exception('Scanning %s failed.', path)
+                    cameras = []
+                if cameras:
+                    self._scan_found.append(
+                        (
+                            camera_fbx.SequenceEntry(
+                                package_path=path, name=path.rsplit('/', 1)[-1]
+                            ),
+                            [camera.label for camera in cameras],
+                        )
+                    )
+
+            if self._scan_pending:
+                self._say(
+                    'Looking for cameras... {0} sequence(s) left, {1} with '
+                    'cameras so far.'.format(
+                        len(self._scan_pending), len(self._scan_found)
+                    )
+                )
+                return
+            self._finish_scan()
+
+        def _stop_scan(self) -> None:
+            if self._scan_timer is not None:
+                self._scan_timer.stop()
+                self._scan_timer.deleteLater()
+                self._scan_timer = None
+            self._scan_pending = []
+
+        def _scanning(self) -> bool:
+            return self._scan_timer is not None
+
+        def _finish_scan(self) -> None:
+            '''Rebuild the list from what the scan found.'''
+            self._stop_scan()
             checked = {
                 path
                 for path, item in self._items.items()
                 if item.checkState(COLUMN_PUBLISH) == QtCore.Qt.Checked
             }
 
-            self._sequences = camera_fbx.list_level_sequences()
-            present = {entry.package_path for entry in self._sequences}
+            found = sorted(self._scan_found, key=lambda pair: pair[0].name.lower())
+            self._scan_found = []
+            self._sequences = [entry for entry, _ in found]
+            self._cameras = {entry.package_path: labels for entry, labels in found}
 
-            # A sequence deleted or renamed since the last read loses its tab.
+            # A sequence deleted, renamed or left without a camera since the
+            # last read loses its tab.
             for path in list(self._tabs):
-                if path not in present:
+                if path not in self._cameras:
                     self._remove_tab(path)
 
             self._tree.blockSignals(True)
             self._tree.clear()
             self._items.clear()
             for entry in self._sequences:
+                labels = self._cameras[entry.package_path]
                 item = QtWidgets.QTreeWidgetItem([entry.name, '', ''])
-                item.setToolTip(COLUMN_NAME, entry.package_path)
+                item.setToolTip(
+                    COLUMN_NAME,
+                    '{0}\nCameras: {1}'.format(entry.package_path, ', '.join(labels)),
+                )
                 item.setData(COLUMN_NAME, QtCore.Qt.UserRole, entry.package_path)
                 item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
                 item.setCheckState(
@@ -500,11 +611,18 @@ def create(session: Any, context_store: Any) -> Any:
 
             if not self._sequences:
                 self._say(
-                    'This project has no level sequences, so there is nothing '
-                    'to render.',
+                    'No level sequence with a camera found, so there is '
+                    'nothing to render.',
                     error=True,
                 )
+            else:
+                self._say(
+                    '{0} level sequence(s) with cameras.'.format(
+                        len(self._sequences)
+                    )
+                )
             self._update_stack()
+            self._refresh_enabled()
 
         def _entry(self, package_path: str) -> Any:
             for entry in self._sequences:
@@ -551,7 +669,7 @@ def create(session: Any, context_store: Any) -> Any:
                 self._say(str(error), error=True)
                 return False
 
-            tab = SequenceTab(entry, defaults)
+            tab = SequenceTab(entry, defaults, self._cameras.get(package_path, []))
             tab.set_tasks(self._tasks, context_store.context_id)
             tab.set_statuses(self._statuses)
             tab.changed.connect(self._refresh_enabled)
@@ -727,6 +845,7 @@ def create(session: Any, context_store: Any) -> Any:
             tabs = list(self._tabs.values())
             ready = (
                 not self._busy
+                and not self._scanning()
                 and bool(tabs)
                 and all(tab.validation_error() is None for tab in tabs)
             )
@@ -734,7 +853,7 @@ def create(session: Any, context_store: Any) -> Any:
             self._run_button.setVisible(not self._busy)
             self._cancel_button.setVisible(self._busy)
             self._cancel_button.setEnabled(self._busy and not self._cancelled)
-            self._refresh_button.setEnabled(not self._busy)
+            self._refresh_button.setEnabled(not self._busy and not self._scanning())
             self._filter_edit.setEnabled(not self._busy)
             self._close_button.setText('Hide' if self._busy else 'Close')
 
@@ -840,6 +959,16 @@ def create(session: Any, context_store: Any) -> Any:
                 )
                 job['metadata'] = dict(tab.defaults.get('metadata') or {})
 
+                # Before the render, from the sequence as it is now: the FBX
+                # and the frames then describe the same state of the shot.
+                self._set_result(job, 'exporting cameras')
+                self._say(
+                    'Exporting the cameras of {0} ({1})...'.format(name, position)
+                )
+                job['cameras'] = camera_fbx.export_cameras(
+                    tab.entry.package_path, output_dir + '_cameras'
+                )
+
                 self._set_result(job, 'rendering')
                 self._say('Rendering {0} ({1})...'.format(name, position))
                 self._set_progress(0.0, 'Rendering {0} ({1})'.format(name, position))
@@ -858,7 +987,7 @@ def create(session: Any, context_store: Any) -> Any:
                         job, success, error
                     ),
                 )
-            except mrq_render.RenderError as error:
+            except (mrq_render.RenderError, camera_fbx.ExportError) as error:
                 self._job_failed(job, str(error))
             except Exception as error:
                 logger.exception('Could not start rendering %s.', name)
@@ -932,17 +1061,28 @@ def create(session: Any, context_store: Any) -> Any:
             self._say('Publishing {0} ({1})...'.format(name, position))
             self._set_progress(0.9, 'Publishing {0} ({1})'.format(name, position))
 
+            # Named after the Level Sequence it was rendered from, so the
+            # component says what it is wherever it ends up.
+            names = unique_names(
+                [
+                    _component_name(sequence, job['tab'].entry.name, len(sequences))
+                    for sequence in sequences
+                ]
+            )
             components = [
                 ComponentSpec(
-                    name=_component_name(sequence, settings.format, len(sequences)),
+                    name=component_name,
                     path=sequence.pattern,
                     metadata={
                         'frame_start': sequence.first,
                         'frame_end': sequence.last,
+                        'image_format': settings.format,
                     },
                 )
-                for sequence in sequences
+                for component_name, sequence in zip(names, sequences)
             ]
+
+            components.extend(self._camera_components(job, components))
 
             metadata = dict(job['metadata'])
             metadata.update(
@@ -982,6 +1122,36 @@ def create(session: Any, context_store: Any) -> Any:
                 lambda error, job=job: self._on_publish_failed(job, error),
                 timeout_seconds=PUBLISH_TIMEOUT_SECONDS,
             )
+
+        def _camera_components(
+            self, job: Dict[str, Any], taken: List[Any]
+        ) -> List[Any]:
+            '''One FBX component per exported camera: ``camera_<label>``.'''
+            cameras = job.get('cameras') or []
+            names = unique_names(
+                [component.name for component in taken]
+                + [
+                    'camera_' + os.path.splitext(os.path.basename(camera.path))[0]
+                    for camera in cameras
+                ]
+            )[len(taken):]
+
+            sequence_metadata = job['metadata']
+            components = []
+            for name, camera in zip(names, cameras):
+                metadata = {
+                    'content': 'camera',
+                    'camera_name': camera.label,
+                    'binding_id': camera.binding_id,
+                    'level_sequence_path': job['package_path'],
+                }
+                for key in ('frame_start', 'frame_end', 'fps'):
+                    if key in sequence_metadata:
+                        metadata[key] = sequence_metadata[key]
+                components.append(
+                    ComponentSpec(name=name, path=camera.path, metadata=metadata)
+                )
+            return components
 
         def _on_published(self, job: Dict[str, Any], result: Any) -> None:
             self._published += 1
@@ -1025,13 +1195,15 @@ def create(session: Any, context_store: Any) -> Any:
                 unreal_env.notify('ftrack: render publish finished - ' + summary)
             self._set_busy(False)
 
-    def _component_name(sequence: Any, image_format: str, count: int) -> str:
-        '''``exr`` for the only sequence; ``exr_<pass>`` when a preset
-        writes several.'''
+    def _component_name(sequence: Any, sequence_name: str, count: int) -> str:
+        '''The Level Sequence's name, e.g. ``SEQ_010``; ``SEQ_010_<pass>``
+        when a preset writes several render passes.'''
         if count == 1:
-            return image_format
+            return sequence_name
         head = os.path.basename(sequence.pattern.split('%')[0]).strip('._')
-        suffix = head.rsplit('.', 1)[-1] if '.' in head else head
-        return '{0}_{1}'.format(image_format, suffix or 'pass')
+        suffix = head.rsplit('.', 1)[-1] if '.' in head else ''
+        if not suffix or suffix == sequence_name:
+            suffix = 'pass'
+        return '{0}_{1}'.format(sequence_name, suffix)
 
     return RenderPublishWindow()

@@ -21,6 +21,7 @@ from ftrack_unreal.publish.publisher import (
     PublishError,
     PublishRequest,
     Publisher,
+    unique_names,
 )
 
 
@@ -470,6 +471,20 @@ class TestSequenceComponents(PublisherFixture):
 
         self.assertIn('SEQ_010.1002.exr', str(caught.exception))
         self.assertEqual(self.session.created, [])
+
+
+class TestUniqueNames(unittest.TestCase):
+    def test_distinct_names_are_kept(self):
+        self.assertEqual(unique_names(['a', 'b']), ['a', 'b'])
+
+    def test_repeats_are_numbered_case_insensitively(self):
+        self.assertEqual(
+            unique_names(['camera_shot', 'camera_Shot', 'camera_shot']),
+            ['camera_shot', 'camera_Shot_2', 'camera_shot_3'],
+        )
+
+    def test_a_suffix_that_is_already_taken_is_skipped(self):
+        self.assertEqual(unique_names(['a', 'a_2', 'a']), ['a', 'a_2', 'a_3'])
 
 
 if __name__ == '__main__':
