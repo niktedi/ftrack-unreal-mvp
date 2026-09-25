@@ -15,8 +15,9 @@ Targets ftrack Connect 24.11.0 and Unreal Engine 5.5 / 5.7 (Python 3.11.8).
 | 2 | Publish — camera → FBX | done |
 | 3 | Asset Manager | done |
 | 4 | Change Context | done |
+| 5 | Update Camera | done |
 
-The MVP is feature-complete: the three menu items open working windows, plus
+The MVP is feature-complete: the four menu items open working windows, plus
 *Reload integration*, which re-reads the Python without restarting the editor.
 
 The Asset Manager can import: select an FBX or Alembic component of a version
@@ -37,8 +38,40 @@ left alone and the published range is reported instead.
 Anything else comes in as a static mesh, under `/Game/ftrack/<asset name>`,
 with an actor placed on the level.
 
-Updating an already-imported asset in place is the next phase and is not
-started — the Update button is disabled with a tooltip saying so.
+### Update Camera
+
+*ftrack → Update Camera* lists every camera binding in the project's Level
+Sequences, with a tick box beside the ones ftrack has a newer version of. Tick
+them, press **Update**, and each is re-imported onto the binding it is already
+on — the binding keeps its GUID, so a Camera Cut track or anything else hooked
+up in Sequencer keeps pointing at it.
+
+**How a camera is recognised.** Every camera import writes a stamp: a metadata
+tag on the Level Sequence, keyed by the binding's GUID, holding the version id,
+version number, asset id and asset name as JSON (`asset_manager/stamps.py` is
+the record, `asset_manager/asset_metadata.py` puts it on the asset). It lives
+inside the `.uasset`, so it travels with the sequence through source control
+and every artist who opens the project sees the same links — the reason it is
+not a file under `Saved`, which is per-machine and would leave the second
+artist to open a shot seeing nothing.
+
+Cameras with no stamp — made by hand, or imported before this existed — are
+listed too, greyed out, saying so. A list that omitted them would read as
+"everything is up to date". For the same reason an asset ftrack could not be
+asked about reads as *not found* rather than as up to date: only one of those
+two should offer a tick box.
+
+**Newest means the highest version number**, whatever its status. Which status
+means "ready" differs per project, and a rule that silently hid a version would
+be worse than showing it, so the status is in the row and the person ticking
+the box decides.
+
+An update never touches the sequence's playback range, for the same reason
+importing onto a non-empty sequence does not: the range is the user's shot
+setup. The new version's published range is reported in the row instead.
+
+Updating imported *geometry* in place is not started; only cameras have a
+binding to update. The Asset Manager's own Update button stays disabled.
 
 ## Install
 
@@ -126,7 +159,8 @@ no engine install.
 | `context.py` | `menu.py` |
 | `publish/publisher.py` | `ui/qt_app.py` |
 | `asset_manager/tree_model.py` | `publish/camera_fbx.py`, `publish/thumbnail.py` |
-| | `asset_manager/details.py`, `asset_manager/importer.py` |
+| `asset_manager/updates.py` | `asset_manager/details.py`, `asset_manager/importer.py` |
+| `asset_manager/stamps.py` | `asset_manager/asset_metadata.py`, `asset_manager/scene_cameras.py` |
 
 `logs.py` sits on the boundary: it imports `unreal` inside a `try`, so the same
 module gives Output Log severity routing inside the editor and a plain stream
@@ -194,7 +228,16 @@ ftrack queries and thumbnail downloads must not block the editor for more than
 ~200 ms. From phase 3 onwards: run the network call on a worker thread, then
 apply the result on the game thread via
 `unreal.register_slate_post_tick_callback`. Nothing may touch a `unreal.*` object
-from the worker.
+from the worker — Unreal refuses, with *Attempted to access Unreal API from
+outside the main game thread*, and takes the tool down with it.
+
+That rule is enforced, not just written down: `tests/test_worker_threads.py`
+parses every function passed to `run_in_background` and fails on any mention of
+`unreal` or `unreal_env` inside one. It exists because the rule was broken in
+phase 5 by a line that did not look like an editor call at all —
+`unreal_env.get_thumbnail_cache_dir()` reads as a path helper and is really
+`unreal.Paths`. Resolve such paths on the game thread and close over the
+string.
 
 ftrack failures the user can act on — no credentials, no permission, no location
 — surface through `unreal_env.show_message` as one sentence; tracebacks go to the
@@ -385,8 +428,10 @@ console. Each prints a pass/fail list and cleans up after itself:
 | `verify_asset_manager.py` | **yes** | the tree queries, lazy versions, details, preview cache |
 | `verify_import.py` | **yes** | the sequence listing, importing a camera and a mesh for real, and every refusal |
 | `verify_change_context.py` | **yes** | the switch and its consequences, then switches back |
+| `verify_update_camera.py` | **yes** | the stamp through a real `.uasset`, the scan, and an in-place update |
 
-The two that need ftrack are read-only against the server. Run them in an Unreal
+The four that need ftrack are read-only against the server; they create Unreal
+assets under `/Game/ftrack`, but write nothing to ftrack. Run them in an Unreal
 started from Connect with a task selected:
 
 ```

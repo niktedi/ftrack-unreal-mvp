@@ -39,7 +39,7 @@ def create(session: Any, context_store: Any) -> Any:
 
     from . import sequence_picker, theme
     from .. import async_utils, unreal_env
-    from ..asset_manager import importer
+    from ..asset_manager import importer, stamps
     from ..asset_manager.details import DetailsReader
     from ..asset_manager.tree_model import ASSET, VERSION, TreeModel, matches
     from ..session import create_worker_session
@@ -686,6 +686,13 @@ def create(session: Any, context_store: Any) -> Any:
                     version=details.version,
                     metadata=details.metadata,
                     sequence_path=sequence_path,
+                    source=stamps.Stamp(
+                        version_id=details.version_id,
+                        version=details.version,
+                        asset_id=details.asset_id,
+                        asset_name=details.asset_name,
+                        component=component.name,
+                    ),
                 )
             except importer.AssetImportError as error:
                 self._say(str(error), error=True)

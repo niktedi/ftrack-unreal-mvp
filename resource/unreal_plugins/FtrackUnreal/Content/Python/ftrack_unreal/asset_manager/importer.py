@@ -23,6 +23,11 @@ shapes, chosen by the asset's type short code:
 anything else
     A static mesh in the Content Browser, then an actor for it on the level.
 
+Every camera import is stamped with the version it came from (:mod:`stamps`),
+which is what makes :func:`update_camera` possible: re-importing a newer
+version onto the binding that is already there, so a Camera Cut track pointing
+at it keeps pointing at it.
+
 Every API used here was checked against a running UE 5.7 rather than taken from
 documentation:
 
@@ -52,6 +57,7 @@ import unreal  # pyright: ignore[reportMissingImports]
 
 from .. import CAMERA_ASSET_TYPE
 from ..logs import get_logger
+from . import asset_metadata, stamps
 
 logger = get_logger(__name__)
 
@@ -112,6 +118,49 @@ class ImportResult:
 
 
 @dataclass(frozen=True)
+class UpdateResult:
+    '''What one in-place camera update produced.'''
+
+    sequence_path: str
+    binding_id: str
+    #: The binding's display name in Sequencer.
+    label: str
+    #: The version it is now on.
+    version: int
+    #: Whether the new version was recorded on the binding. A failed stamp
+    #: leaves a camera that is up to date but will not be offered next time,
+    #: so it is reported rather than swallowed.
+    stamped: bool = True
+    #: How many bindings the import added. Must be zero: create_cameras is off,
+    #: so anything else means the importer did not do what was asked.
+    added_bindings: int = 0
+    #: The new version's published frame range, which an update never applies.
+    range_note: Optional[str] = None
+
+    @property
+    def clean(self) -> bool:
+        '''Whether it went exactly as intended.'''
+        return self.added_bindings == 0 and self.stamped
+
+    @property
+    def summary(self) -> str:
+        '''One line for the window's table.'''
+        parts = ['updated to v{0:03d}'.format(self.version)]
+        if self.range_note:
+            parts.append(self.range_note)
+        if not self.stamped:
+            parts.append(
+                'but the new version could not be recorded on the binding'
+            )
+        if self.added_bindings:
+            parts.append(
+                'and it added {0} binding(s) it should not have -- check the '
+                'sequence'.format(self.added_bindings)
+            )
+        return ', '.join(parts)
+
+
+@dataclass(frozen=True)
 class SequenceInfo:
     '''One Level Sequence already in the project, for the picker to offer.'''
 
@@ -154,6 +203,7 @@ def import_component(
     version: int = 0,
     metadata: Optional[Dict[str, str]] = None,
     sequence_path: Optional[str] = None,
+    source: Optional[stamps.Stamp] = None,
 ) -> ImportResult:
     '''Import one component into the level.
 
@@ -168,6 +218,10 @@ def import_component(
         sequence_path: Package path of the Level Sequence a camera goes onto,
             as :func:`list_level_sequences` reports it. Required for ``cam``
             and ignored for everything else.
+        source: Stamped onto the camera binding this creates, so *Update
+            Camera* can find it again. Only cameras are stamped -- a static
+            mesh has no binding to hang it on, and updating geometry in place
+            is a separate question from updating a camera.
 
     Returns:
         What was created.
@@ -210,7 +264,7 @@ def import_component(
                 'A camera needs a level sequence to be imported onto, and '
                 'none was chosen.'
             )
-        return _import_camera(file_path, sequence_path, metadata or {})
+        return _import_camera(file_path, sequence_path, metadata or {}, source)
 
     return _import_geometry(
         file_path, kind, destination_path(asset_name),
@@ -306,8 +360,14 @@ def _import_camera(
     file_path: str,
     sequence_path: str,
     metadata: Dict[str, str],
+    source: Optional[stamps.Stamp] = None,
 ) -> ImportResult:
-    '''Import the camera FBX onto the Level Sequence at *sequence_path*.'''
+    '''Import the camera FBX onto the Level Sequence at *sequence_path*.
+
+    *source* is stamped onto whichever binding the import creates, which is
+    what later lets *Update Camera* tell this camera apart from one somebody
+    built by hand and know which version it is on.
+    '''
     world = _editor_world()
     sequence = _load_level_sequence(sequence_path)
 
@@ -344,12 +404,18 @@ def _import_camera(
         )
 
     note = _apply_frame_range(sequence, metadata, was_empty)
+
+    added = _new_binding(sequence, bindings)
+    stamped_id = binding_id(added) if added is not None else None
+    if source is not None and stamped_id:
+        asset_metadata.write(sequence, stamped_id, source)
+
     _save(sequence)
 
     return ImportResult(
         kind='camera',
         asset_paths=[str(sequence.get_path_name())],
-        actor_label=_new_binding(sequence, bindings),
+        actor_label=binding_name(added) if added is not None else None,
         target=sequence_path.rsplit('/', 1)[-1],
         note=note,
     )
@@ -422,38 +488,157 @@ def _bindings_of(sequence: Any) -> List[Any]:
         return []
 
 
-def _new_binding(sequence: Any, before: List[Any]) -> Optional[str]:
-    '''Return the display name of the binding the import added.
+def _new_binding(sequence: Any, before: List[Any]) -> Optional[Any]:
+    '''Return the camera binding the import added.
 
     Named by difference rather than by taking the first one: the sequence may
     have held a dozen bindings already, and the one worth reporting is the
-    camera that just arrived. Falls back to the last binding when the
-    comparison finds nothing -- an import that only replaced an existing
-    camera's transform track adds no binding at all.
+    camera that just arrived.
+
+    One import adds *two* bindings -- the camera actor and a child for its
+    camera component -- so which of the new ones is picked matters. Taking the
+    last with a name picked the component about as often as the actor, and a
+    stamp on the component links a thing the update list does not even show.
+    The camera test settles it; the name test is only a tiebreak among
+    bindings that are all cameras.
+
+    Falls back to the whole list when the comparison finds nothing: an import
+    that only replaced an existing camera's transform track adds no binding at
+    all.
     '''
     after = _bindings_of(sequence)
     if not after:
         return None
 
-    known = {_binding_id(binding) for binding in before}
+    known = {binding_id(binding) for binding in before}
     known.discard(None)
-    fresh = [binding for binding in after if _binding_id(binding) not in known]
+    fresh = [binding for binding in after if binding_id(binding) not in known]
 
-    for binding in reversed(fresh or after):
-        name = _binding_name(binding)
-        if name:
-            return name
-    return None
+    candidates = fresh or after
+    cameras = [
+        binding for binding in candidates if is_camera_binding(binding)
+    ]
+
+    for binding in reversed(cameras or candidates):
+        if binding_name(binding):
+            return binding
+    return (cameras or candidates)[-1]
 
 
-def _binding_id(binding: Any) -> Optional[str]:
+def is_camera_binding(binding: Any) -> bool:
+    '''Whether *binding* is a camera actor, rather than a part of one.
+
+    Importing a camera FBX produces **two** bindings: the camera actor, and a
+    child binding for its camera component, which is where focal length and
+    focus live. Only the actor is a camera for our purposes -- the component
+    is a row nobody asked for in the update list, and stamping it instead of
+    the actor links the wrong thing.
+
+    Telling them apart is the whole job here, and a name test cannot do it:
+    ``CineCameraComponent`` contains "camera" as readily as
+    ``CineCameraActor`` does. So the class is asked what it descends from, and
+    anything under ``ActorComponent`` is rejected before the camera test runs.
+
+    Both storage shapes are covered because the FBX importer makes spawnables,
+    which carry a template object, while a camera dragged into Sequencer by
+    hand is a possessable, which carries only a class.
+    '''
     try:
-        return str(unreal.MovieSceneBindingExtensions.get_id(binding))
+        template = unreal.MovieSceneBindingExtensions.get_object_template(
+            binding
+        )
     except Exception:
+        template = None
+
+    if template is not None:
+        # A spawnable knows exactly what it spawns, so this is the answer --
+        # no falling through to the class check and second-guessing it.
+        return isinstance(template, unreal.CameraActor)
+
+    try:
+        klass = unreal.MovieSceneBindingExtensions.get_possessed_object_class(
+            binding
+        )
+    except Exception:
+        return False
+
+    return _class_is_camera_actor(klass)
+
+
+def _class_is_camera_actor(klass: Any) -> bool:
+    '''Whether *klass* is a camera actor class, and not a camera component.'''
+    if klass is None:
+        return False
+
+    try:
+        if klass.is_child_of(unreal.ActorComponent.static_class()):
+            return False
+    except Exception as error:
+        logger.debug('Could not test %s against ActorComponent: %s', klass, error)
+
+    try:
+        return bool(klass.is_child_of(unreal.CameraActor.static_class()))
+    except Exception as error:
+        logger.debug('Could not test %s against CameraActor: %s', klass, error)
+
+    # Last resort, if `is_child_of` is ever not on the class wrapper. The
+    # component exclusion has to be repeated here: this is exactly the test
+    # that let CameraComponent through before.
+    try:
+        name = str(klass.get_name()).lower()
+    except Exception:
+        return False
+    return 'camera' in name and 'component' not in name
+
+
+def binding_id(binding: Any) -> Optional[str]:
+    '''Return *binding*'s GUID as a stable string, or ``None``.
+
+    Emphatically not ``str()`` on the Guid. Unreal renders a struct as
+    ``<Struct 'Guid' (0x0000023F...) {...}>`` -- the object's address is in
+    there, so the same binding stringifies differently on every read. As a
+    metadata key that is silent poison: the stamp writes under one name and is
+    looked up under another, and the camera reads back as never imported.
+
+    The four uint32 fields are the Guid, so they are what the key is built
+    from. This is ``FGuid::ToString(EGuidFormats::Digits)``, which is also what
+    Unreal itself writes.
+    '''
+    try:
+        guid = unreal.MovieSceneBindingExtensions.get_id(binding)
+    except Exception as error:
+        logger.debug('A binding has no readable id: %s', error)
+        return None
+
+    return guid_to_string(guid)
+
+
+def guid_to_string(guid: Any) -> Optional[str]:
+    '''Return *guid* as 32 hex digits, or ``None`` if it cannot be read.'''
+    if guid is None:
+        return None
+
+    try:
+        return '{0:08X}{1:08X}{2:08X}{3:08X}'.format(
+            int(guid.a) & 0xFFFFFFFF,
+            int(guid.b) & 0xFFFFFFFF,
+            int(guid.c) & 0xFFFFFFFF,
+            int(guid.d) & 0xFFFFFFFF,
+        )
+    except Exception as error:
+        logger.debug('Could not read a guid field by field: %s', error)
+
+    # Kismet's own conversion, in case a future engine stops exposing the
+    # fields. Its format has dashes in it; that is fine, it only has to be the
+    # same string every time.
+    try:
+        return str(unreal.GuidLibrary.conv_guid_to_string(guid))
+    except Exception as error:
+        logger.warning('Could not turn a guid into a string: %s', error)
         return None
 
 
-def _binding_name(binding: Any) -> Optional[str]:
+def binding_name(binding: Any) -> Optional[str]:
     try:
         return (
             str(unreal.MovieSceneBindingExtensions.get_display_name(binding))
@@ -461,6 +646,130 @@ def _binding_name(binding: Any) -> Optional[str]:
         )
     except Exception:
         return None
+
+
+def update_camera(
+    sequence_path: str,
+    binding_id: str,
+    file_path: str,
+    source: stamps.Stamp,
+    metadata: Optional[Dict[str, str]] = None,
+) -> UpdateResult:
+    '''Re-import a camera onto the binding it is already on.
+
+    In place: the binding keeps its id, so everything pointing at it -- a
+    Camera Cut track, a parent track, anything the user hooked up in Sequencer
+    -- keeps pointing at it. Only the camera's animation is replaced.
+
+    Args:
+        sequence_path: Package path of the Level Sequence holding the camera.
+        binding_id: GUID of the binding to import onto.
+        file_path: The new version's FBX, already resolved to a local path.
+        source: What to stamp the binding with afterwards.
+        metadata: The new version's metadata. Only read for the frame range,
+            which is reported rather than applied -- see below.
+
+    Returns:
+        What happened, per camera, for the window's table.
+
+    Raises:
+        AssetImportError: With a message meant for the user.
+
+    Synchronous and game-thread only.
+    '''
+    if not file_path:
+        raise AssetImportError(
+            'The new version has no file path on this machine. Transfer it to '
+            'a local location first.'
+        )
+
+    if not os.path.isfile(file_path):
+        raise AssetImportError(
+            'ftrack points at {0}, but there is no file there.'.format(
+                file_path
+            )
+        )
+
+    world = _editor_world()
+    sequence = _load_level_sequence(sequence_path)
+
+    # Imported here, not at module level: scene_cameras reads this module's
+    # sequence listing, so importing it at the top would be a cycle.
+    from . import scene_cameras
+
+    binding = scene_cameras.find_binding(sequence, binding_id)
+    if binding is None:
+        raise AssetImportError(
+            'That camera is no longer on {0}. Refresh the list and try '
+            'again.'.format(sequence_path.rsplit('/', 1)[-1])
+        )
+
+    before = _bindings_of(sequence)
+
+    settings = unreal.MovieSceneUserImportFBXSettings()
+    # The whole point of an update: replace the keys on a binding that is
+    # already there. Creating a camera would leave the old one behind and put
+    # a second one beside it, which is what makes an "update" feel like a bug.
+    settings.set_editor_property('create_cameras', False)
+    settings.set_editor_property('replace_transform_track', True)
+    settings.set_editor_property('match_by_name_only', False)
+    settings.set_editor_property('reduce_keys', False)
+
+    logger.info(
+        'Updating binding %s on %s from %s', binding_id, sequence_path, file_path
+    )
+
+    try:
+        # Only the target binding is passed, so there is exactly one candidate
+        # for the FBX's camera node to land on.
+        imported = unreal.SequencerTools.import_level_sequence_fbx(
+            world, sequence, [binding], settings, file_path
+        )
+    except Exception as error:
+        raise AssetImportError('The update failed: {0}'.format(error))
+
+    if not imported:
+        raise AssetImportError(
+            'Unreal refused to import {0} onto "{1}". The Output Log will say '
+            'why.'.format(os.path.basename(file_path), _binding_label(binding))
+        )
+
+    # create_cameras is off, so the binding count must not have moved. If it
+    # has, the importer did something other than what was asked and the user
+    # should look before trusting the result.
+    added = len(_bindings_of(sequence)) - len(before)
+
+    stamped = asset_metadata.write(sequence, binding_id, source)
+    _save(sequence)
+
+    return UpdateResult(
+        sequence_path=sequence_path,
+        binding_id=binding_id,
+        label=_binding_label(binding),
+        version=source.version,
+        stamped=stamped,
+        added_bindings=added,
+        range_note=_frame_range_note(metadata or {}),
+    )
+
+
+def _binding_label(binding: Any) -> str:
+    return binding_name(binding) or 'the camera'
+
+
+def _frame_range_note(metadata: Dict[str, str]) -> Optional[str]:
+    '''Return what to say about the new version's frame range, if anything.
+
+    An update never touches the sequence's playback range. The sequence is the
+    user's shot and its range is part of that setup -- the same reasoning as
+    importing onto a sequence that already has bindings. So the published range
+    is reported and left for them to apply.
+    '''
+    start = _as_int(metadata.get('frame_start'))
+    end = _as_int(metadata.get('frame_end'))
+    if start is None or end is None or end < start:
+        return None
+    return 'published as {0}-{1}'.format(start, end)
 
 
 # -- geometry ---------------------------------------------------------------

@@ -147,6 +147,9 @@ class VersionDetails:
     '''Everything the details panel shows for one version.'''
 
     version_id: str
+    #: Id of the asset this is a version of. What ties an imported camera to
+    #: the thing that can have a newer version -- see ``updates``.
+    asset_id: str
     asset_name: str
     #: Display name of the asset type, e.g. ``Camera``.
     asset_type: str
@@ -217,6 +220,7 @@ class DetailsReader:
 
         return VersionDetails(
             version_id=version['id'],
+            asset_id=asset.get('id') or '',
             asset_name=asset.get('name') or '',
             asset_type=(asset.get('type') or {}).get('name') or '',
             asset_type_short=(asset.get('type') or {}).get('short') or '',

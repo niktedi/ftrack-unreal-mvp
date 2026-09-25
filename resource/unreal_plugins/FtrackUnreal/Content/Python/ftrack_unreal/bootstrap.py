@@ -56,6 +56,7 @@ def get_context_store() -> Optional[ContextStore]:
 TOOLS = (
     ('publish', 'Publish', 'publish_window'),
     ('asset_manager', 'Asset Manager', 'asset_manager_window'),
+    ('update_camera', 'Update Camera', 'update_camera_window'),
     ('change_context', 'Change Context', 'change_context_window'),
 )
 

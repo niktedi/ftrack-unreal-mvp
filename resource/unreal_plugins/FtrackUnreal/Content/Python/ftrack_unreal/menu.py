@@ -90,9 +90,9 @@ def build(context_label: str, actions: Dict[str, Callable[[], None]]) -> None:
     Args:
         context_label: Text of the read-only context entry, e.g.
             ``Project / Shot / Task``.
-        actions: Maps ``publish`` / ``asset_manager`` / ``change_context`` to
-            the callable that opens the corresponding window. A missing key
-            renders that item disabled.
+        actions: Maps ``publish`` / ``asset_manager`` / ``update_camera`` /
+            ``change_context`` to the callable that opens the corresponding
+            window. A missing key renders that item disabled.
     '''
     tool_menus = unreal.ToolMenus.get()
 
@@ -141,6 +141,14 @@ def build(context_label: str, actions: Dict[str, Callable[[], None]]) -> None:
         'Asset Manager...',
         'Browse ftrack assets and versions',
         actions.get('asset_manager'),
+    )
+    _add_entry(
+        menu,
+        'tools',
+        'ftrack_update_camera',
+        'Update Camera...',
+        'Re-import imported cameras at their newest published version',
+        actions.get('update_camera'),
     )
     _add_entry(
         menu,
