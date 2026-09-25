@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..logs import get_logger
+from . import image_sequence
 
 logger = get_logger(__name__)
 
@@ -35,6 +36,27 @@ BUILTIN_LOCATION_NAMES = frozenset(
         'ftrack.connect',
     )
 )
+
+
+def asset_matches_type(asset: Any, short: str) -> bool:
+    '''Return whether *asset* is of the asset type *short*.
+
+    Matches the type's short code, or its name case-insensitively -- the same
+    rule :meth:`Publisher._resolve_asset_type` uses to pick the type. An asset
+    whose type was not fetched counts as a match, so a caller that did not
+    project ``type`` keeps the old name-only behaviour.
+    '''
+    try:
+        asset_type = asset.get('type')
+    except Exception:
+        return True
+    if not asset_type:
+        return True
+    wanted = (short or '').lower()
+    return (
+        (asset_type.get('short') or '').lower() == wanted
+        or (asset_type.get('name') or '').lower() == wanted
+    )
 
 
 class PublishError(Exception):
@@ -220,10 +242,30 @@ class Publisher:
             raise PublishError('There is nothing to publish.')
 
         for component in request.components:
+            if image_sequence.is_sequence_path(component.path):
+                self._validate_sequence(component.path)
+                continue
+
             path = os.path.normpath(component.path)
             if not os.path.exists(path):
                 raise PublishError(
                     'The exported file is missing: {0}'.format(path)
+                )
+
+    @staticmethod
+    def _validate_sequence(path: str) -> None:
+        '''Refuse a sequence with a frame missing from disk.
+
+        ``ftrack_api`` would otherwise fail on that frame half-way through the
+        upload, after the version and the earlier frames were already made.
+        '''
+        members = image_sequence.sequence_member_paths(path)
+        for member in members:
+            if not os.path.exists(member):
+                raise PublishError(
+                    'A frame of the rendered sequence is missing: {0}'.format(
+                        os.path.normpath(member)
+                    )
                 )
 
     def _pick_location(self) -> Any:
@@ -271,11 +313,19 @@ class Publisher:
 
         wanted = asset_name.lower()
         for existing in self.list_assets(parent['id']):
-            if existing['name'].lower() == wanted:
+            if existing['name'].lower() != wanted:
+                continue
+            # A render named after its sequence must not become a version of
+            # the camera published from that same sequence.
+            if not asset_matches_type(existing, request.asset_type):
                 logger.info(
-                    'Reusing existing asset %s', existing['name']
+                    'Asset %s exists but is not of type %s; creating another.',
+                    existing['name'],
+                    request.asset_type,
                 )
-                return existing
+                continue
+            logger.info('Reusing existing asset %s', existing['name'])
+            return existing
 
         asset_type = self._resolve_asset_type(request.asset_type)
         logger.info('Creating asset %s under %s', asset_name, parent['name'])
@@ -287,6 +337,10 @@ class Publisher:
     def _resolve_asset_type(self, short: str) -> Any:
         '''Return the AssetType with short code *short*, creating it if absent.
 
+        A type whose *name* is *short* (``render`` / ``Render``) is accepted
+        when no short code matches: studios set these up by hand, and the
+        short code of a "Render" type is not always ``render``.
+
         Creating one changes the studio's schema for everyone, so it is logged
         as a warning rather than silently.
         '''
@@ -296,6 +350,21 @@ class Publisher:
             )
         ).first()
         if asset_type is not None:
+            return asset_type
+
+        names = sorted({short, short.lower(), short.capitalize()})
+        asset_type = self._session.query(
+            'select id, name, short from AssetType where name in ({0})'.format(
+                ', '.join('"{0}"'.format(name) for name in names)
+            )
+        ).first()
+        if asset_type is not None:
+            logger.info(
+                'Using asset type "%s" (short "%s") for "%s"',
+                asset_type['name'],
+                asset_type['short'],
+                short,
+            )
             return asset_type
 
         logger.warning(
@@ -342,7 +411,12 @@ class Publisher:
     ) -> List[str]:
         component_ids = []
         for spec in request.components:
-            path = os.path.normpath(spec.path)
+            # Sequence notation goes to ftrack_api as written: it parses the
+            # ` [1001-1100]` suffix itself and makes one member per frame.
+            if image_sequence.is_sequence_path(spec.path):
+                path = spec.path
+            else:
+                path = os.path.normpath(spec.path)
             component = version.create_component(
                 path,
                 data={'name': spec.name, 'metadata': dict(spec.metadata)},

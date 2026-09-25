@@ -10,6 +10,7 @@ the data layer (``session``, ``context``, ``publish.publisher``,
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 import unreal  # pyright: ignore[reportMissingImports]
@@ -52,6 +53,29 @@ def get_export_dir(asset_name: str) -> str:
         project_saved_dir(), 'ftrack', 'publish', _sanitise(asset_name)
     )
     os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_render_dir(sequence_name: str) -> str:
+    '''Return (and create) a fresh directory for one render.
+
+    ``<Project>/Saved/ftrack/render/<sequence_name>/<YYYYmmdd_HHMMSS>``.
+
+    A new directory per run, because the frames are found again by listing it:
+    frames left over from an earlier render with a longer range would otherwise
+    be published as part of this one. Staging only, like
+    :func:`get_export_dir` -- the published copy lives in the ftrack location.
+    '''
+    base = os.path.join(
+        project_saved_dir(), 'ftrack', 'render', _sanitise(sequence_name)
+    )
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(base, stamp)
+    suffix = 1
+    while os.path.exists(path):
+        suffix += 1
+        path = os.path.join(base, '{0}_{1}'.format(stamp, suffix))
+    os.makedirs(path)
     return path
 
 

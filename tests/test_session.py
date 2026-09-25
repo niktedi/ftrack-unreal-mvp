@@ -10,6 +10,8 @@ traceback out of ftrack_api.
 from __future__ import annotations
 
 import os
+import sys
+import types
 import unittest
 
 import _bootstrap  # noqa: F401  (sets up sys.path)
@@ -102,6 +104,77 @@ class TestCredentials(unittest.TestCase):
         session_module._session = BrokenSession()
         session_module.reset_shared_session()
         self.assertIsNone(session_module._session)
+
+
+class FakeHub:
+    def __init__(self, error=None):
+        self.error = error
+        self.connects = 0
+
+    def connect(self):
+        self.connects += 1
+        if self.error is not None:
+            raise self.error
+
+
+class TestPublishSession(unittest.TestCase):
+    '''The publishing session must have its event hub connected.
+
+    ``Location.add_components`` sends ``ftrack.location.component-added``
+    through the session's hub with ``on_error='ignore'``; a disconnected hub
+    drops it silently and listeners never hear of the publish.
+    '''
+
+    def setUp(self):
+        self.hub = FakeHub()
+        self.created = []
+        hub = self.hub
+        created = self.created
+
+        class Session:
+            def __init__(self, auto_connect_event_hub=True):
+                self.auto_connect_event_hub = auto_connect_event_hub
+                self.event_hub = hub
+                created.append(self)
+
+        module = types.ModuleType('ftrack_api')
+        module.Session = Session
+        previous = sys.modules.get('ftrack_api')
+        sys.modules['ftrack_api'] = module
+        self.addCleanup(
+            lambda: sys.modules.pop('ftrack_api', None)
+            if previous is None
+            else sys.modules.__setitem__('ftrack_api', previous)
+        )
+
+    def test_the_hub_is_connected_synchronously(self):
+        with CredentialEnvironment(CREDENTIALS):
+            session = session_module.create_publish_session()
+
+        self.assertEqual(self.hub.connects, 1)
+        # Not the background auto-connect: events published before that thread
+        # got through would sit in a queue the closing session throws away.
+        self.assertFalse(session.auto_connect_event_hub)
+
+    def test_a_hub_that_will_not_connect_does_not_stop_the_publish(self):
+        self.hub.error = RuntimeError('event server unreachable')
+
+        with CredentialEnvironment(CREDENTIALS):
+            session = session_module.create_publish_session()
+
+        self.assertIs(session, self.created[0])
+
+    def test_worker_sessions_stay_disconnected(self):
+        with CredentialEnvironment(CREDENTIALS):
+            session_module.create_worker_session()
+
+        self.assertEqual(self.hub.connects, 0)
+
+    def test_missing_credentials_are_reported_before_connecting(self):
+        with CredentialEnvironment([]):
+            with self.assertRaises(FtrackSessionError):
+                session_module.create_publish_session()
+        self.assertEqual(self.hub.connects, 0)
 
 
 class TestGetUser(unittest.TestCase):

@@ -49,7 +49,7 @@ def create(session: Any, context_store: Any) -> Any:
         PublishRequest,
         Publisher,
     )
-    from ..session import create_worker_session
+    from ..session import create_publish_session, create_worker_session
 
     class PublishWindow(QtWidgets.QWidget):
         '''Publish a camera from a Level Sequence to the current task.'''
@@ -405,7 +405,13 @@ def create(session: Any, context_store: Any) -> Any:
             )
 
             def work():
-                return Publisher(create_worker_session()).publish(request)
+                # A connected event hub, so ftrack.location.component-added
+                # reaches its listeners; closed after, which disconnects it.
+                publish_session = create_publish_session()
+                try:
+                    return Publisher(publish_session).publish(request)
+                finally:
+                    publish_session.close()
 
             async_utils.run_in_background(
                 work, self._on_published, self._on_publish_failed

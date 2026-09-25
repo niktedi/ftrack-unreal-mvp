@@ -6,10 +6,14 @@ One session per editor process, created lazily. Credentials come from the
 environment that ftrack Connect handed down at launch:
 ``FTRACK_SERVER``, ``FTRACK_API_USER``, ``FTRACK_API_KEY``.
 
-The event hub is deliberately left disconnected. Nothing in the integration
-publishes or subscribes to server-side events yet, and an extra background
-thread inside the editor buys us nothing but a way to touch the API off the
-main thread.
+The event hub is left disconnected everywhere except in the session that
+publishes (:func:`create_publish_session`). ``ftrack.location.component-added``
+is not sent by the server: ``Location.add_components`` publishes it from the
+client, through the session's own hub, with ``on_error='ignore'``. A publish from
+a session without a connected hub therefore drops the event without a word, and
+anything listening for new components -- a transfer or sync service -- never
+hears about it. ``ftrack.update`` is unaffected, because the server sends it on
+commit.
 
 Pure Python -- must not import ``unreal``.
 '''
@@ -137,6 +141,39 @@ def create_worker_session() -> Any:
         raise FtrackSessionError(
             'Could not connect to ftrack: {0}'.format(error)
         )
+
+
+def create_publish_session() -> Any:
+    '''Return a worker session whose event hub is connected, for publishing.
+
+    ``Location.add_components`` announces every component it stores with an
+    ``ftrack.location.component-added`` event sent through this hub; with the
+    hub disconnected the event is silently dropped (see the module docstring).
+    One event goes out per component, so a rendered sequence sends one for the
+    container and one per frame.
+
+    ``connect`` blocks until the websocket is up, which is why this is for the
+    worker thread and not for the shared session. A hub that will not connect
+    does not stop the publish -- the files still reach the location -- but it
+    is logged, since whatever listens for the event will not hear of it.
+
+    The caller must ``close()`` the session when the publish is done: that is
+    what disconnects the hub and stops its background thread.
+
+    Raises:
+        FtrackSessionError: If credentials are missing or the server refuses.
+    '''
+    session = create_worker_session()
+    try:
+        session.event_hub.connect()
+    except Exception as error:
+        logger.warning(
+            'Could not connect to the ftrack event hub (%s). The publish goes '
+            'ahead, but listeners on ftrack.location.component-added will not '
+            'be told about it.',
+            error,
+        )
+    return session
 
 
 def reset_shared_session() -> None:

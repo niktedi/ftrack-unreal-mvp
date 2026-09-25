@@ -10,6 +10,7 @@ asset hangs, who decides the version number, what happens when a step fails.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -383,6 +384,92 @@ class TestAssetType(PublisherFixture):
         message = str(caught.exception)
         self.assertIn('cam', message)
         self.assertIn('supervisor', message)
+
+    def test_a_type_named_like_the_short_code_is_used(self):
+        render_type = FakeEntity('AssetType', id='at-9', name='Render', short='rnd')
+        self.results['from AssetType where short'] = []
+        self.results['from AssetType where name'] = [render_type]
+
+        self.publisher.publish(self.request(asset_type='render'))
+
+        self.assertEqual(self.session.created_of('AssetType'), [])
+        self.assertIs(self.session.created_of('Asset')[0]['type'], render_type)
+        name_query = [q for q in self.session.queries if 'where name in' in q][0]
+        self.assertIn('"Render"', name_query)
+        self.assertIn('"render"', name_query)
+
+
+class TestAssetTypeOnReuse(PublisherFixture):
+    def test_same_name_of_another_type_is_not_versioned(self):
+        camera = FakeEntity(
+            'Asset',
+            id='asset-cam',
+            name='SEQ_010',
+            type={'name': 'Camera', 'short': 'cam'},
+        )
+        self.results['from Asset where'] = [camera]
+
+        result = self.publisher.publish(
+            self.request(asset_name='SEQ_010', asset_type='render')
+        )
+
+        self.assertNotEqual(result.asset_id, 'asset-cam')
+        self.assertEqual(len(self.session.created_of('Asset')), 1)
+
+    def test_same_name_of_the_same_type_by_name_is_versioned(self):
+        render = FakeEntity(
+            'Asset',
+            id='asset-render',
+            name='SEQ_010',
+            type={'name': 'Render', 'short': 'rnd'},
+        )
+        self.results['from Asset where'] = [render]
+
+        result = self.publisher.publish(
+            self.request(asset_name='seq_010', asset_type='render')
+        )
+
+        self.assertEqual(result.asset_id, 'asset-render')
+        self.assertEqual(self.session.created_of('Asset'), [])
+
+
+class TestSequenceComponents(PublisherFixture):
+    def setUp(self):
+        super().setUp()
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        for frame in (1001, 1002, 1003):
+            path = os.path.join(self.directory, 'SEQ_010.{0}.exr'.format(frame))
+            with open(path, 'wb') as handle:
+                handle.write(b'exr')
+        self.pattern = (
+            os.path.join(self.directory, 'SEQ_010.') + '%04d.exr [1001-1003]'
+        )
+
+    def test_sequence_notation_reaches_ftrack_api_untouched(self):
+        self.publisher.publish(
+            self.request(
+                asset_type='render',
+                components=[ComponentSpec(name='exr', path=self.pattern)],
+            )
+        )
+
+        version = self.session.created_of('AssetVersion')[0]
+        self.assertEqual(version.components[0]['path'], self.pattern)
+        self.assertEqual(version.components[0]['data']['name'], 'exr')
+
+    def test_a_missing_frame_is_refused_before_anything_is_created(self):
+        os.unlink(os.path.join(self.directory, 'SEQ_010.1002.exr'))
+
+        with self.assertRaises(PublishError) as caught:
+            self.publisher.publish(
+                self.request(
+                    components=[ComponentSpec(name='exr', path=self.pattern)]
+                )
+            )
+
+        self.assertIn('SEQ_010.1002.exr', str(caught.exception))
+        self.assertEqual(self.session.created, [])
 
 
 if __name__ == '__main__':

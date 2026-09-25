@@ -16,8 +16,9 @@ Targets ftrack Connect 24.11.0 and Unreal Engine 5.5 / 5.7 (Python 3.11.8).
 | 3 | Asset Manager | done |
 | 4 | Change Context | done |
 | 5 | Update Camera | done |
+| 6 | Publish Render — Level Sequences → MRQ → image sequence | done, pending in-editor verification |
 
-The MVP is feature-complete: the four menu items open working windows, plus
+The MVP is feature-complete: the menu items open working windows, plus
 *Reload integration*, which re-reads the Python without restarting the editor.
 
 The Asset Manager can import: select an FBX or Alembic component of a version
@@ -72,6 +73,69 @@ setup. The new version's published range is reported in the row instead.
 
 Updating imported *geometry* in place is not started; only cameras have a
 binding to update. The Asset Manager's own Update button stays disabled.
+
+### Publish Render
+
+*ftrack → Publish Render* renders Level Sequences with the Movie Render Queue
+and publishes the frames. The left panel lists every Level Sequence in the
+project with a *Publish* tick box. Each ticked sequence gets its own tab of
+settings on the right:
+
+- **Asset name**: the sequence name by default. A hint says whether the asset
+  already exists (a new version) or will be created.
+- **Task**: your open tasks in the context's project. The current context is the
+  default, even when it is not assigned to you.
+- **Frame range**: the sequence playback range, with *Reset* to go back to it.
+- **MRQ preset**: any `MoviePipelinePrimaryConfig` in the project, or the
+  built-in settings (a deferred pass).
+- **Format**: EXR, PNG or JPG.
+- **Resolution**: taken from the preset, or 1920×1080.
+- **Comment** and **Status**.
+
+**Render & Publish** takes the sequences one at a time, in tab order. For each
+one it:
+
+1. renders into a fresh `Saved/ftrack/render/<sequence>/<timestamp>`, so frames
+   left over from an earlier render cannot leak into this one;
+2. finds the frames on disk and publishes them as a single image-sequence
+   component (`exr`, `png` or `jpg`) on an asset of type `render` under the
+   chosen task's parent.
+
+The *Result* column shows how far each sequence got. A failure there comes with
+its reason in the tooltip, and the loop moves on to the next sequence. *Cancel*
+stops the current render and skips the rest.
+
+Rules that are easy to trip over:
+
+- **The frame range in the window is inclusive.** MRQ's custom range, like
+  Unreal's playback range, is end-exclusive. `mrq_render` adds the one frame,
+  and `sequence_defaults` takes it off the playback end.
+- **The window owns the image output.**
+  - Output directory, file name (`{sequence_name}.{frame_number}`, 4-digit
+    padding), range, resolution and format override the preset.
+  - The preset's own image-sequence outputs are removed, so the publish finds
+    exactly one set of frames.
+  - Everything else in the preset (anti-aliasing, passes, cvars) is kept.
+- **The MRQ window's queue is not touched.** The job goes into a queue of its
+  own, rendered with
+  `MoviePipelineQueueSubsystem.render_queue_instance_with_executor_instance`.
+  Engines without that call fall back to `executor.execute(queue)`.
+- **A render with a frame missing is not published.** The frames on disk are
+  checked against the requested range. The publisher then checks every frame
+  exists before creating the version, so `ftrack_api` never fails halfway
+  through an upload.
+- **The asset must be the right type to be versioned.** A camera asset named
+  `SEQ_010` is not versioned by a render of `SEQ_010`; a new `render` asset is
+  created beside it. The type is found by short code, or by name
+  (`render` / `Render`) when no short code matches.
+- **Thumbnails.** PNG and JPG use the middle frame. EXR, which neither ftrack
+  nor a browser can show, uses a viewport capture, as the camera publish does.
+- **The level must have been saved.** MRQ renders a copy of a saved level and
+  refuses an untitled one.
+
+`FtrackUnreal.uplugin` now force-enables `MovieRenderPipeline`. The editor must
+be restarted once to pick that up; *Reload integration* does not re-read the
+`.uplugin`.
 
 ## Install
 
@@ -173,9 +237,24 @@ there, passed in by the caller. `ContextStore`, for instance, takes a
 
 ### Session and context
 
-One session per editor process, created lazily, event hub left disconnected —
-nothing publishes or subscribes to server events, and an extra background thread
-inside the editor only creates ways to touch the API off the main thread.
+One session per editor process, created lazily, with the event hub left
+disconnected. The integration subscribes to no server events, and an extra
+background thread inside the editor only creates ways to touch the API off the
+main thread.
+
+**The exception is the publish.** It runs on a session of its own,
+`session.create_publish_session()`, whose hub is connected before the publish
+and disconnected after it by `close()`. This matters because the server does not
+send `ftrack.location.component-added`. `Location.add_components` sends it from
+the client, through that session's hub, with `on_error='ignore'`. On a
+disconnected hub the event is dropped without a word, and a listener such as a
+transfer or sync service never learns that a component arrived. `ftrack.update`
+did fire all along, because the server sends it on commit, which is what gave
+the problem away.
+
+A sequence component sends one event for the container and one per frame. If
+the hub cannot connect, the publish still goes ahead and the files reach the
+location; a warning is logged instead.
 
 Context resolution order at start-up:
 
@@ -425,6 +504,7 @@ console. Each prints a pass/fail list and cleans up after itself:
 |---|---|---|
 | `verify_camera_export.py` | no | builds a throwaway sequence, exports a real FBX |
 | `verify_publish_window.py` | no | the Publish form: validation, name clashes, refresh on reopen |
+| `verify_render_publish.py` | no | the Publish Render window, then a real 3-frame MRQ render found again as a sequence (needs a saved level) |
 | `verify_asset_manager.py` | **yes** | the tree queries, lazy versions, details, preview cache |
 | `verify_import.py` | **yes** | the sequence listing, importing a camera and a mesh for real, and every refusal |
 | `verify_change_context.py` | **yes** | the switch and its consequences, then switches back |

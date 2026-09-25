@@ -90,9 +90,10 @@ def build(context_label: str, actions: Dict[str, Callable[[], None]]) -> None:
     Args:
         context_label: Text of the read-only context entry, e.g.
             ``Project / Shot / Task``.
-        actions: Maps ``publish`` / ``asset_manager`` / ``update_camera`` /
-            ``change_context`` to the callable that opens the corresponding
-            window. A missing key renders that item disabled.
+        actions: Maps ``publish`` / ``publish_render`` / ``asset_manager`` /
+            ``update_camera`` / ``change_context`` to the callable that
+            opens the corresponding window. A missing key renders that item
+            disabled.
     '''
     tool_menus = unreal.ToolMenus.get()
 
@@ -133,6 +134,15 @@ def build(context_label: str, actions: Dict[str, Callable[[], None]]) -> None:
         'Publish...',
         'Publish a camera from this scene to ftrack',
         actions.get('publish'),
+    )
+    _add_entry(
+        menu,
+        'tools',
+        'ftrack_publish_render',
+        'Publish Render...',
+        'Render level sequences with the Movie Render Queue and publish the '
+        'frames to ftrack',
+        actions.get('publish_render'),
     )
     _add_entry(
         menu,

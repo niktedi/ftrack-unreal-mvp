@@ -55,6 +55,7 @@ def get_context_store() -> Optional[ContextStore]:
 #: Menu key -> window title, and the module under `ui` that builds it.
 TOOLS = (
     ('publish', 'Publish', 'publish_window'),
+    ('publish_render', 'Publish Render', 'render_publish_window'),
     ('asset_manager', 'Asset Manager', 'asset_manager_window'),
     ('update_camera', 'Update Camera', 'update_camera_window'),
     ('change_context', 'Change Context', 'change_context_window'),
