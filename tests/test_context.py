@@ -10,7 +10,12 @@ import unittest
 
 from _bootstrap import FakeSession  # noqa: E402  (sets up sys.path)
 
-from ftrack_unreal.context import CONFIG_KEY, CONFIG_SECTION, ContextStore
+from ftrack_unreal.context import (
+    CONFIG_KEY,
+    CONFIG_SECTION,
+    ContextStore,
+    find_render_task,
+)
 
 
 def make_task(entity_id='task-1', name='animation', link=None):
@@ -230,3 +235,34 @@ class TestQueryUserTasks(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def flat(task_id, name, parent_name, assigned=True):
+    return {
+        'id': task_id,
+        'name': name,
+        'parent_name': parent_name,
+        'assigned': assigned,
+    }
+
+
+class TestFindRenderTask(unittest.TestCase):
+    def test_rendering_under_the_sequence_name_is_found(self):
+        tasks = [
+            flat('t1', 'Lighting', 'SEQ_010'),
+            flat('t2', 'Rendering', 'SEQ_020'),
+            flat('t3', 'Rendering', 'SEQ_010'),
+        ]
+        self.assertEqual(find_render_task(tasks, 'SEQ_010'), 't3')
+
+    def test_names_compare_case_insensitively(self):
+        tasks = [flat('t1', 'rendering', 'seq_010')]
+        self.assertEqual(find_render_task(tasks, 'SEQ_010'), 't1')
+
+    def test_a_task_the_user_is_not_assigned_to_is_not_the_default(self):
+        tasks = [flat('t1', 'Rendering', 'SEQ_010', assigned=False)]
+        self.assertIsNone(find_render_task(tasks, 'SEQ_010'))
+
+    def test_no_such_task(self):
+        self.assertIsNone(find_render_task([flat('t1', 'Comp', 'SEQ_010')], 'SEQ_010'))
+        self.assertIsNone(find_render_task([], 'SEQ_010'))

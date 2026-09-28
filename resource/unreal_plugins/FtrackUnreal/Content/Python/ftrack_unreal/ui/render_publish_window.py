@@ -62,9 +62,9 @@ def create(session: Any, context_store: Any) -> Any:
     from PySide6 import QtCore, QtGui, QtWidgets
 
     from . import theme
-    from .. import RENDER_ASSET_TYPE, async_utils, unreal_env
+    from .. import RENDER_ASSET_TYPE, RENDER_TASK_NAME, async_utils, unreal_env
     from ..asset_manager import scene_cameras
-    from ..context import query_user_tasks
+    from ..context import find_render_task, query_user_tasks
     from ..publish import camera_fbx, image_sequence, mrq_render, thumbnail
     from ..publish.publisher import (
         ComponentSpec,
@@ -133,6 +133,11 @@ def create(session: Any, context_store: Any) -> Any:
             self.task_combo = QtWidgets.QComboBox()
             self.task_combo.setSizeAdjustPolicy(
                 QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon
+            )
+            # Shown while nothing is selected: no <project> / <sequence> /
+            # Rendering task exists that the user is assigned to.
+            self.task_combo.setPlaceholderText(
+                'Select {0} task to publish into...'.format(RENDER_TASK_NAME)
             )
             self.task_combo.currentIndexChanged.connect(self._on_task_changed)
             form.addRow('Task', self.task_combo)
@@ -206,17 +211,26 @@ def create(session: Any, context_store: Any) -> Any:
 
         # -- filling --------------------------------------------------------
 
-        def set_tasks(self, tasks: List[Dict[str, Any]], default_id: Optional[str]) -> None:
-            '''Fill the task combo, keeping the choice when it still exists.'''
-            previous = self.task_combo.currentData() or default_id
+        def set_tasks(self, tasks: List[Dict[str, Any]]) -> None:
+            '''Fill the task combo, keeping the choice when it still exists.
+
+            With no choice yet, the default is ``<project> / <sequence name> /
+            Rendering`` if the user is assigned to it. Otherwise nothing is
+            selected: the combo shows its placeholder, and the render stays
+            blocked until a task is picked. Falling back to some other task
+            would publish a shot's render into the wrong place without anyone
+            noticing.
+            '''
+            previous = self.task_combo.currentData()
+            default_id = find_render_task(tasks, self.entry.name)
             self.task_combo.blockSignals(True)
             self.task_combo.clear()
             for task in tasks:
                 self.task_combo.addItem(task['label'], task['id'])
-            index = self.task_combo.findData(previous)
-            if index < 0:
+            index = self.task_combo.findData(previous) if previous else -1
+            if index < 0 and default_id:
                 index = self.task_combo.findData(default_id)
-            self.task_combo.setCurrentIndex(max(index, 0) if tasks else -1)
+            self.task_combo.setCurrentIndex(index)
             self.task_combo.blockSignals(False)
             self._on_task_changed()
 
@@ -248,7 +262,9 @@ def create(session: Any, context_store: Any) -> Any:
             if not self.asset_name():
                 return 'Give the asset a name.'
             if not self.task_id():
-                return 'Pick the task to publish to.'
+                return 'Select the {0} task to publish into.'.format(
+                    RENDER_TASK_NAME
+                )
             if self.start_spin.value() > self.end_spin.value():
                 return 'The first frame is after the last one.'
             return None
@@ -670,7 +686,7 @@ def create(session: Any, context_store: Any) -> Any:
                 return False
 
             tab = SequenceTab(entry, defaults, self._cameras.get(package_path, []))
-            tab.set_tasks(self._tasks, context_store.context_id)
+            tab.set_tasks(self._tasks)
             tab.set_statuses(self._statuses)
             tab.changed.connect(self._refresh_enabled)
             tab.taskChanged.connect(
@@ -724,10 +740,12 @@ def create(session: Any, context_store: Any) -> Any:
                 worker = create_worker_session()
                 publisher = Publisher(worker)
 
-                def flatten(task):
+                def flatten(task, assigned=True):
                     link = task['link'] or []
                     return {
                         'id': task['id'],
+                        'name': task['name'],
+                        'assigned': assigned,
                         'label': ' / '.join(item['name'] for item in link)
                         or task['name'],
                         'parent_id': task['parent']['id'],
@@ -741,12 +759,13 @@ def create(session: Any, context_store: Any) -> Any:
                 except PublishError:
                     task = None
                 if task is not None:
-                    current = flatten(task)
+                    current = flatten(task, assigned=False)
                     project_id = task['project']['id']
 
                 tasks = [flatten(task) for task in query_user_tasks(worker, project_id)]
-                # The context is the default target even when it is not
-                # assigned to the user -- they launched on it for a reason.
+                # The context stays pickable even when it is not assigned to
+                # the user -- they launched on it for a reason -- but it is
+                # never the default: see find_render_task.
                 if current is not None and not any(
                     entry['id'] == current['id'] for entry in tasks
                 ):
@@ -773,7 +792,7 @@ def create(session: Any, context_store: Any) -> Any:
             self._tasks = data['tasks']
             self._statuses = data['statuses']
             for tab in self._tabs.values():
-                tab.set_tasks(self._tasks, context_store.context_id)
+                tab.set_tasks(self._tasks)
                 tab.set_statuses(self._statuses)
 
             if not data['context_is_task']:

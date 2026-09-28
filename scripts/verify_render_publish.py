@@ -198,27 +198,50 @@ def check_window():
         tab.cameras,
     )
 
-    window._on_ftrack_data(
-        {
-            'tasks': [
-                {
-                    'id': 'check-task-id',
-                    'label': 'Demo / sh010 / lighting',
-                    'parent_id': 'check-parent',
-                    'parent_name': 'sh010',
-                },
-                {
-                    'id': 'other-task',
-                    'label': 'Demo / sh020 / lighting',
-                    'parent_id': 'other-parent',
-                    'parent_name': 'sh020',
-                },
-            ],
-            'statuses': ['WIP', 'Review'],
-            'context_is_task': True,
-        }
+    def feed(rendering_assigned):
+        window._on_ftrack_data(
+            {
+                'tasks': [
+                    {
+                        'id': 'check-task-id',
+                        'name': 'lighting',
+                        'assigned': False,
+                        'label': 'Demo / sh010 / lighting',
+                        'parent_id': 'check-parent',
+                        'parent_name': 'sh010',
+                    },
+                    {
+                        'id': 'render-task',
+                        'name': 'Rendering',
+                        'assigned': rendering_assigned,
+                        'label': 'Demo / {0} / Rendering'.format(PROBE_NAME),
+                        'parent_id': 'render-parent',
+                        'parent_name': PROBE_NAME,
+                    },
+                ],
+                'statuses': ['WIP', 'Review'],
+                'context_is_task': True,
+            }
+        )
+
+    feed(rendering_assigned=False)
+    check(
+        'no task is picked when the Rendering task is not the user\'s',
+        tab.task_id() is None and not window._run_button.isEnabled(),
+        tab.task_id(),
     )
-    check('the context task is the default', tab.task_id() == 'check-task-id')
+    check(
+        'the combo asks for the Rendering task',
+        tab.task_combo.placeholderText() == 'Select Rendering task to publish into...',
+        tab.task_combo.placeholderText(),
+    )
+
+    feed(rendering_assigned=True)
+    check(
+        '<project> / <sequence> / Rendering is the default',
+        tab.task_id() == 'render-task',
+        tab.task_id(),
+    )
     check('statuses fill the combo', tab.status_combo.count() == 3)
     check('render enabled once a task is set', window._run_button.isEnabled())
 

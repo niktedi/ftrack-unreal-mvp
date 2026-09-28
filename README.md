@@ -90,8 +90,17 @@ shows, read-only, which cameras will be exported:
 
 - **Asset name**: the sequence name by default. A hint says whether the asset
   already exists (a new version) or will be created.
-- **Task**: your open tasks in the context's project. The current context is the
-  default, even when it is not assigned to you.
+- **Task**: your open tasks in the context's project. The current context is
+  also in the list, even when it is not assigned to you.
+  - **Default:** `<project> / <sequence name> / Rendering`, i.e. the task named
+    `Rendering` whose parent has the Level Sequence's name. Names compare
+    case-insensitively.
+  - **No default:** if there is no such open task, or you are not assigned to
+    it, nothing is selected. The combo reads *Select Rendering task to publish
+    into...* and *Render & Publish* stays disabled until you pick a task.
+    Falling back to the context task would put one shot's render into another
+    shot without anyone noticing.
+  - Picking a task by hand survives a reload of the list.
 - **Frame range**: the sequence playback range, with *Reset* to go back to it.
 - **MRQ preset**: any `MoviePipelinePrimaryConfig` in the project, or the
   built-in settings (a deferred pass).

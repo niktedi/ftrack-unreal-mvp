@@ -31,3 +31,8 @@ CAMERA_ASSET_TYPE = 'cam'
 #: under. A type *named* ``render`` / ``Render`` is used when no short code
 #: matches -- see ``Publisher._resolve_asset_type``.
 RENDER_ASSET_TYPE = 'render'
+
+#: Name of the task a Level Sequence's render goes to by default: the one
+#: called this under an entity named like the sequence --
+#: ``<project> / <sequence name> / Rendering``.
+RENDER_TASK_NAME = 'Rendering'

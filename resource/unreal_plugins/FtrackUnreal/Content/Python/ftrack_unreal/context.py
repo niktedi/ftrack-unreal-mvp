@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import configparser
 import os
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from . import RENDER_TASK_NAME
 from .logs import get_logger
 
 logger = get_logger(__name__)
@@ -233,3 +234,38 @@ def query_user_tasks(session: Any, project_id: Optional[str] = None) -> List[Any
         query += ' and project.id is "{0}"'.format(project_id)
 
     return session.query(query).all()
+
+
+def find_render_task(
+    tasks: List[Dict[str, Any]],
+    sequence_name: str,
+    task_name: str = RENDER_TASK_NAME,
+) -> Optional[str]:
+    '''Return the id of the task a render of *sequence_name* goes to by default.
+
+    That is the task called *task_name* whose parent is named like the
+    sequence -- ``<project> / SEQ_010 / Rendering`` for ``SEQ_010`` -- and
+    only if the user is assigned to it. Names compare case-insensitively.
+
+    Args:
+        tasks: Flattened tasks with ``id``, ``name``, ``parent_name`` and
+            ``assigned``. Tasks that are not the user's (``assigned`` false)
+            are skipped: publishing into someone else's task by default would
+            be a surprise.
+        sequence_name: The Level Sequence's asset name.
+        task_name: The task name to look for.
+
+    Returns:
+        The task id, or ``None`` when there is no such task for this user.
+    '''
+    wanted_parent = (sequence_name or '').strip().lower()
+    wanted_task = (task_name or '').strip().lower()
+    for task in tasks:
+        if not task.get('assigned', True):
+            continue
+        if (
+            (task.get('name') or '').lower() == wanted_task
+            and (task.get('parent_name') or '').lower() == wanted_parent
+        ):
+            return task['id']
+    return None
